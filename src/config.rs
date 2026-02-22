@@ -20,11 +20,19 @@ pub struct PlayerConfig {
     pub attack_angle: f32,
     pub attack_cooldown: f32,
     pub invincibility: f32,
+    pub dash_multiplier: f32,
 }
 
 #[derive(Clone, Copy)]
 pub struct CombatConfig {
     pub attack_effect_duration: f32,
+    pub screen_shake_duration: f32,
+    pub screen_shake_intensity: f32,
+    pub knockback_speed: f32,
+    pub knockback_duration: f32,
+    pub hit_stop_duration: f32,
+    pub damage_text_lifetime: f32,
+    pub damage_text_rise_speed: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -93,9 +101,17 @@ impl Default for GameConfig {
                 attack_angle: 60.0,
                 attack_cooldown: 0.4,
                 invincibility: 0.5,
+                dash_multiplier: 1.8,
             },
             combat: CombatConfig {
-                attack_effect_duration: 0.15,
+                attack_effect_duration: 0.2,
+                screen_shake_duration: 0.1,
+                screen_shake_intensity: 3.0,
+                knockback_speed: 200.0,
+                knockback_duration: 0.15,
+                hit_stop_duration: 0.05,
+                damage_text_lifetime: 0.8,
+                damage_text_rise_speed: 60.0,
             },
             enemy: EnemyConfig {
                 min_count: 5,
@@ -124,9 +140,7 @@ impl Default for GameConfig {
                 backpack_base_capacity: 2,
                 backpack_capacity_per_rarity: 1,
             },
-            transfer: TransferConfig {
-                charges_per_run: 5,
-            },
+            transfer: TransferConfig { charges_per_run: 5 },
         }
     }
 }

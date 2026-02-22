@@ -25,8 +25,28 @@ pub struct InvincibilityTimer {
     pub remaining: f32,
 }
 
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 #[require(FloorEntity)]
 pub struct AttackEffect {
     pub remaining: f32,
+    pub duration: f32,
+    pub start_angle: f32,
+    pub end_angle: f32,
+    pub initial_alpha: f32,
+}
+
+#[derive(Component)]
+pub struct Dead;
+
+#[derive(Component, Clone, Copy)]
+pub struct FloatingDamageText {
+    pub lifetime: f32,
+    pub velocity: Vec2,
+}
+
+#[derive(Component, Clone, Copy)]
+pub struct Knockback {
+    pub direction: Vec2,
+    pub remaining: f32,
+    pub speed: f32,
 }

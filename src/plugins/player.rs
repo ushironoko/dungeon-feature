@@ -1,38 +1,49 @@
 use bevy::prelude::*;
 
+use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
+
+use bevy::sprite::Anchor;
+
 use crate::components::{
-    Attack, AttackCooldown, AttackEffect, CameraFollow, Defense, Enemy, FacingDirection, Health,
-    Player, Speed, TileKind,
+    Attack, AttackCooldown, AttackEffect, CameraFollow, DashActive, Defense, Enemy,
+    FacingDirection, Health, Player, Speed, TileKind,
 };
 use crate::config::GameConfig;
 use crate::events::DamageEvent;
 use crate::plugins::combat::{calculate_damage, is_in_attack_fan};
 use crate::resources::player_state::PlayerState;
-use crate::resources::{apply_movement_with_collision, FloorMap};
+use crate::resources::sprite_assets::{SpriteAssets, make_sprite};
+use crate::resources::{ActiveCharmEffects, FloorMap, RegenTimer, apply_movement_with_collision};
 use crate::states::{FloorTransitionSetup, GameState, PlayingSet};
 
 pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            OnEnter(GameState::FloorTransition),
-            spawn_player.in_set(FloorTransitionSetup::SpawnEntities),
-        )
-        .add_systems(
-            Update,
-            (player_movement, player_attack)
-                .chain()
-                .in_set(PlayingSet::Player)
-                .run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            (sync_player_state, check_stairs, check_treasure_chest)
-                .chain()
-                .in_set(PlayingSet::PostCombat)
-                .run_if(in_state(GameState::Playing)),
-        );
+        app.init_resource::<DashActive>()
+            .add_systems(
+                OnEnter(GameState::FloorTransition),
+                spawn_player.in_set(FloorTransitionSetup::SpawnEntities),
+            )
+            .add_systems(
+                Update,
+                (toggle_dash, player_movement, player_attack)
+                    .chain()
+                    .in_set(PlayingSet::Player)
+                    .run_if(in_state(GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                (
+                    sync_player_state,
+                    charm_regen,
+                    check_stairs,
+                    check_treasure_chest,
+                )
+                    .chain()
+                    .in_set(PlayingSet::PostCombat)
+                    .run_if(in_state(GameState::Playing)),
+            );
     }
 }
 
@@ -41,12 +52,20 @@ fn spawn_player(
     floor_map: Res<FloorMap>,
     config: Res<GameConfig>,
     player_state: Res<PlayerState>,
+    sprite_assets: Res<SpriteAssets>,
+    images: Res<Assets<Image>>,
 ) {
     let (sx, sy) = floor_map.spawn_point;
     let tile_size = config.dungeon.tile_size;
 
     commands.spawn((
-        Sprite::from_color(Color::srgb(0.2, 0.4, 0.9), Vec2::splat(tile_size * 0.8)),
+        make_sprite(
+            &sprite_assets.player,
+            &images,
+            Color::srgb(0.2, 0.4, 0.9),
+            Color::WHITE,
+            Vec2::splat(tile_size * 0.8),
+        ),
         Transform::from_xyz(sx as f32 * tile_size, sy as f32 * tile_size, 1.0),
         Player,
         Speed(config.player.speed),
@@ -65,12 +84,19 @@ fn spawn_player(
     ));
 }
 
+fn toggle_dash(keyboard: Res<ButtonInput<KeyCode>>, mut dash: ResMut<DashActive>) {
+    if keyboard.just_pressed(KeyCode::ShiftLeft) || keyboard.just_pressed(KeyCode::ShiftRight) {
+        dash.0 = !dash.0;
+    }
+}
+
 fn player_movement(
     keyboard: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut query: Query<(&mut Transform, &Speed, &mut FacingDirection), With<Player>>,
     floor_map: Res<FloorMap>,
     config: Res<GameConfig>,
+    dash: Res<DashActive>,
 ) {
     let Ok((mut transform, speed, mut facing)) = query.single_mut() else {
         return;
@@ -99,29 +125,43 @@ fn player_movement(
     facing.0 = direction;
 
     let tile_size = config.dungeon.tile_size;
-    let velocity = direction * speed.0 * time.delta_secs();
+    let multiplier = if dash.0 {
+        config.player.dash_multiplier
+    } else {
+        1.0
+    };
+    let velocity = direction * speed.0 * multiplier * time.delta_secs();
 
     transform.translation =
         apply_movement_with_collision(transform.translation, velocity, &floor_map, tile_size);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn player_attack(
     mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
     mut player_query: Query<
-        (Entity, &Transform, &FacingDirection, &Attack, &mut AttackCooldown),
+        (
+            Entity,
+            &Transform,
+            &FacingDirection,
+            &Attack,
+            &mut AttackCooldown,
+        ),
         With<Player>,
     >,
     enemy_query: Query<(Entity, &Transform, &Defense), With<Enemy>>,
     mut damage_events: MessageWriter<DamageEvent>,
     config: Res<GameConfig>,
+    effects: Res<ActiveCharmEffects>,
+    sprite_assets: Res<SpriteAssets>,
+    images: Res<Assets<Image>>,
 ) {
     if !keyboard.just_pressed(KeyCode::Space) {
         return;
     }
 
-    let Ok((player_entity, transform, facing, attack, mut cooldown)) =
-        player_query.single_mut()
+    let Ok((player_entity, transform, facing, attack, mut cooldown)) = player_query.single_mut()
     else {
         return;
     };
@@ -130,26 +170,42 @@ fn player_attack(
         return;
     }
 
-    cooldown.remaining = cooldown.duration;
+    cooldown.remaining = cooldown.duration * (1.0 - effects.0.cooldown_reduction);
 
     let player_pos = transform.translation.truncate();
     let attack_range = config.player.attack_range;
     let attack_angle = config.player.attack_angle;
 
-    // 攻撃エフェクトをスポーン
-    let effect_offset = facing.0 * (attack_range * 0.5);
+    // 剣スラッシュエフェクトをスポーン
+    let attack_duration = config.combat.attack_effect_duration;
+    let base_angle = facing.0.y.atan2(facing.0.x) - FRAC_PI_2;
+    let start_angle = base_angle + FRAC_PI_4;
+    let end_angle = base_angle - FRAC_PI_4;
+
+    let sword_size = Vec2::new(attack_range * 0.3, attack_range * 0.8);
+    let sword_sprite = make_sprite(
+        &sprite_assets.attack_sword,
+        &images,
+        Color::srgba(1.0, 1.0, 0.5, 0.6),
+        Color::WHITE,
+        sword_size,
+    );
+    let initial_alpha = sword_sprite.color.alpha();
+
     commands.spawn((
-        Sprite::from_color(
-            Color::srgba(1.0, 1.0, 0.5, 0.4),
-            Vec2::splat(attack_range * 0.6),
-        ),
-        Transform::from_xyz(
-            player_pos.x + effect_offset.x,
-            player_pos.y + effect_offset.y,
-            2.0,
-        ),
+        sword_sprite,
+        Anchor::BOTTOM_CENTER,
+        Transform {
+            translation: Vec3::new(player_pos.x, player_pos.y, 2.0),
+            rotation: Quat::from_rotation_z(start_angle),
+            ..default()
+        },
         AttackEffect {
-            remaining: config.combat.attack_effect_duration,
+            remaining: attack_duration,
+            duration: attack_duration,
+            start_angle,
+            end_angle,
+            initial_alpha,
         },
     ));
 
@@ -167,10 +223,7 @@ fn player_attack(
     }
 }
 
-fn sync_player_state(
-    query: Query<&Health, With<Player>>,
-    mut player_state: ResMut<PlayerState>,
-) {
+fn sync_player_state(query: Query<&Health, With<Player>>, mut player_state: ResMut<PlayerState>) {
     let Ok(health) = query.single() else {
         return;
     };
@@ -204,6 +257,28 @@ fn check_stairs(
     if floor_map.tile_at(tile_x, tile_y) == Some(TileKind::Stairs) {
         info!("Descending stairs...");
         next_state.set(GameState::FloorTransition);
+    }
+}
+
+fn charm_regen(
+    time: Res<Time>,
+    effects: Res<ActiveCharmEffects>,
+    mut regen_timer: ResMut<RegenTimer>,
+    mut query: Query<&mut Health, With<Player>>,
+) {
+    if effects.0.regen_amount == 0 || effects.0.regen_interval <= 0.0 {
+        return;
+    }
+    regen_timer.0 += time.delta_secs();
+    if regen_timer.0 >= effects.0.regen_interval {
+        regen_timer.0 -= effects.0.regen_interval;
+        let Ok(mut health) = query.single_mut() else {
+            return;
+        };
+        if health.current < health.max {
+            health.current = (health.current + effects.0.regen_amount).min(health.max);
+            info!("Charm regen: HP {}/{}", health.current, health.max);
+        }
     }
 }
 

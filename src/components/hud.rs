@@ -14,3 +14,6 @@ pub struct EquipmentText;
 
 #[derive(Component)]
 pub struct HudTransferChargeText;
+
+#[derive(Component)]
+pub struct DashStateText;

@@ -188,6 +188,16 @@ impl BspNode {
     }
 }
 
+/// exclude_idx 以外のランダムな部屋インデックスを返す。
+/// total_rooms <= 1 の場合は exclude_idx をそのまま返す。
+fn select_different_room_index(rng: &mut StdRng, total_rooms: usize, exclude_idx: usize) -> usize {
+    if total_rooms <= 1 {
+        return exclude_idx;
+    }
+    let offset = rng.random_range(1..total_rooms);
+    (exclude_idx + offset) % total_rooms
+}
+
 fn carve_l_corridor(tiles: &mut [TileKind], map_width: i32, x1: i32, y1: i32, x2: i32, y2: i32) {
     let min_x = x1.min(x2);
     let max_x = x1.max(x2);
@@ -248,17 +258,14 @@ pub fn generate_bsp_floor(
 
     root.connect_rooms(&mut tiles, width);
 
-    let spawn_point = rooms[0].center();
+    let spawn_idx = rng.random_range(0..rooms.len());
+    let spawn_point = rooms[spawn_idx].center();
 
     let stairs_position = if is_last_floor {
         None
     } else {
-        let stairs_room = if rooms.len() > 1 {
-            &rooms[rooms.len() - 1]
-        } else {
-            &rooms[0]
-        };
-        let pos = stairs_room.center();
+        let stairs_idx = select_different_room_index(rng, rooms.len(), spawn_idx);
+        let pos = rooms[stairs_idx].center();
         let idx = (pos.1 * width + pos.0) as usize;
         tiles[idx] = TileKind::Stairs;
         Some(pos)
@@ -274,12 +281,8 @@ pub fn generate_bsp_floor(
 
     // 最終階にはTreasureChestを配置
     let treasure_chest_position = if is_last_floor {
-        let chest_room = if rooms.len() > 1 {
-            &rooms[rooms.len() - 1]
-        } else {
-            &rooms[0]
-        };
-        let pos = chest_room.center();
+        let chest_idx = select_different_room_index(rng, rooms.len(), spawn_idx);
+        let pos = rooms[chest_idx].center();
         let idx = (pos.1 * width + pos.0) as usize;
         tiles[idx] = TileKind::TreasureChest;
         Some(pos)
@@ -393,14 +396,20 @@ mod tests {
     fn test_generates_multiple_rooms() {
         let mut rng = make_rng(42);
         let floor = generate_bsp_floor(48, 48, &mut rng, 5, 15, false);
-        assert!(floor.rooms.len() >= 2, "Expected >= 2 rooms, got {}", floor.rooms.len());
+        assert!(
+            floor.rooms.len() >= 2,
+            "Expected >= 2 rooms, got {}",
+            floor.rooms.len()
+        );
     }
 
     #[test]
     fn test_spawn_and_stairs_different() {
         let mut rng = make_rng(42);
         let floor = generate_bsp_floor(48, 48, &mut rng, 5, 15, false);
-        let stairs = floor.stairs_position.expect("Non-last floor should have stairs");
+        let stairs = floor
+            .stairs_position
+            .expect("Non-last floor should have stairs");
         assert_ne!(
             floor.spawn_point, stairs,
             "Spawn and stairs should be at different positions"
@@ -423,7 +432,10 @@ mod tests {
         let floor1 = generate_bsp_floor(48, 48, &mut rng1, 5, 15, false);
         let mut rng2 = make_rng(123);
         let floor2 = generate_bsp_floor(48, 48, &mut rng2, 5, 15, false);
-        assert_eq!(floor1.tiles, floor2.tiles, "Same seed should produce same floor");
+        assert_eq!(
+            floor1.tiles, floor2.tiles,
+            "Same seed should produce same floor"
+        );
         assert_eq!(floor1.spawn_point, floor2.spawn_point);
         assert_eq!(floor1.stairs_position, floor2.stairs_position);
     }
@@ -456,7 +468,10 @@ mod tests {
         }
 
         for (i, tile) in floor.tiles.iter().enumerate() {
-            if matches!(tile, TileKind::Floor | TileKind::Stairs | TileKind::TreasureChest) {
+            if matches!(
+                tile,
+                TileKind::Floor | TileKind::Stairs | TileKind::TreasureChest
+            ) {
                 assert!(
                     visited[i],
                     "Tile at ({}, {}) is not reachable from spawn",
@@ -473,7 +488,11 @@ mod tests {
         let floor = generate_bsp_floor(48, 48, &mut rng, 5, 15, false);
         let (sx, sy) = floor.spawn_point;
         let tile = floor.tile_at(sx, sy);
-        assert_eq!(tile, Some(TileKind::Floor), "Spawn point must be a Floor tile");
+        assert_eq!(
+            tile,
+            Some(TileKind::Floor),
+            "Spawn point must be a Floor tile"
+        );
     }
 
     #[test]
@@ -503,8 +522,14 @@ mod tests {
     fn test_minimum_map_size_fallback() {
         let mut rng = make_rng(42);
         let floor = generate_bsp_floor(8, 8, &mut rng, 5, 15, false);
-        assert!(!floor.rooms.is_empty(), "Fallback should create at least 1 room");
-        assert!(floor.stairs_position.is_some(), "Non-last floor should have stairs");
+        assert!(
+            !floor.rooms.is_empty(),
+            "Fallback should create at least 1 room"
+        );
+        assert!(
+            floor.stairs_position.is_some(),
+            "Non-last floor should have stairs"
+        );
 
         let (sx, sy) = floor.spawn_point;
         assert!(
@@ -533,7 +558,9 @@ mod tests {
     fn test_treasure_chest_reachable_from_spawn() {
         let mut rng = make_rng(42);
         let floor = generate_bsp_floor(48, 48, &mut rng, 5, 15, true);
-        let chest_pos = floor.treasure_chest_position.expect("Should have treasure chest");
+        let chest_pos = floor
+            .treasure_chest_position
+            .expect("Should have treasure chest");
 
         let mut visited = vec![false; (floor.width * floor.height) as usize];
         let mut stack = vec![floor.spawn_point];
@@ -561,8 +588,7 @@ mod tests {
         assert!(
             visited[chest_idx],
             "TreasureChest at ({}, {}) must be reachable from spawn",
-            chest_pos.0,
-            chest_pos.1,
+            chest_pos.0, chest_pos.1,
         );
     }
 
@@ -574,5 +600,60 @@ mod tests {
             floor.treasure_chest_position.is_none(),
             "Non-last floor should not have a treasure chest"
         );
+    }
+
+    #[test]
+    fn test_select_different_room_index_two_rooms() {
+        let mut rng = make_rng(99);
+        // 2部屋: exclude=0 → 必ず1, exclude=1 → 必ず0
+        assert_eq!(select_different_room_index(&mut rng, 2, 0), 1);
+        assert_eq!(select_different_room_index(&mut rng, 2, 1), 0);
+    }
+
+    #[test]
+    fn test_select_different_room_index_one_room() {
+        let mut rng = make_rng(99);
+        // 1部屋: exclude をそのまま返す
+        assert_eq!(select_different_room_index(&mut rng, 1, 0), 0);
+    }
+
+    #[test]
+    fn test_select_different_room_index_many_rooms() {
+        let mut rng = make_rng(42);
+        let total = 10;
+        for exclude in 0..total {
+            let result = select_different_room_index(&mut rng, total, exclude);
+            assert_ne!(result, exclude, "Must select a different room");
+            assert!(result < total, "Index must be in range");
+        }
+    }
+
+    #[test]
+    fn test_randomized_spawn_deterministic_with_seed() {
+        let mut rng1 = make_rng(777);
+        let floor1 = generate_bsp_floor(48, 48, &mut rng1, 5, 15, false);
+        let mut rng2 = make_rng(777);
+        let floor2 = generate_bsp_floor(48, 48, &mut rng2, 5, 15, false);
+        assert_eq!(floor1.spawn_point, floor2.spawn_point);
+        assert_eq!(floor1.stairs_position, floor2.stairs_position);
+    }
+
+    #[test]
+    fn test_treasure_chest_not_at_spawn() {
+        // 複数部屋がある場合、宝箱はスポーンと異なる位置
+        for seed in 0..20u64 {
+            let mut rng = make_rng(seed);
+            let floor = generate_bsp_floor(48, 48, &mut rng, 5, 15, true);
+            if floor.rooms.len() > 1 {
+                let chest = floor
+                    .treasure_chest_position
+                    .expect("Last floor should have chest");
+                assert_ne!(
+                    floor.spawn_point, chest,
+                    "Treasure chest should not be at spawn (seed={})",
+                    seed
+                );
+            }
+        }
     }
 }

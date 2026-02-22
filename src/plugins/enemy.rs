@@ -2,14 +2,18 @@ use bevy::prelude::*;
 use rand::Rng;
 
 use crate::components::{
-    AiState, Attack, AttackCooldown, AttackRange, ChaseLostTimer, Defense, DetectionRadius, Enemy,
-    FloorEntity, Health, Player, Speed, WanderDirection, WanderTimer,
+    AiState, Attack, AttackCooldown, AttackRange, ChaseLostTimer, Dead, Defense, DetectionRadius,
+    Enemy, FloorEntity, Health, Player, Speed, WanderDirection, WanderInterval, WanderTimer,
 };
 use crate::config::GameConfig;
 use crate::events::DamageEvent;
-use crate::plugins::combat::{calculate_damage, enemy_count_random, slime_stats};
+use crate::plugins::combat::{
+    ENEMY_KIND_META, calculate_damage, determine_enemy_kind, enemy_stats,
+};
+use crate::resources::sprite_assets::{SpriteAssets, make_sprite};
 use crate::resources::{
-    apply_movement_with_collision, pixel_to_tile, CurrentFloor, DungeonRng, FloorMap,
+    ActiveCharmEffects, CurrentFloor, DungeonRng, FloorMap, apply_movement_with_collision,
+    pixel_to_tile,
 };
 use crate::states::{FloorTransitionSetup, GameState, PlayingSet};
 
@@ -36,18 +40,43 @@ impl Plugin for EnemyPlugin {
     }
 }
 
+/// プレイヤーからの最低スポーン距離（タイル数）
+const MIN_SPAWN_DISTANCE_TILES: f32 = 8.0;
+/// 部屋内でのリトライ回数上限
+const SPAWN_POSITION_RETRIES: u32 = 5;
+
 fn spawn_enemies(
     mut commands: Commands,
     floor_map: Res<FloorMap>,
     current_floor: Res<CurrentFloor>,
     config: Res<GameConfig>,
     mut dungeon_rng: ResMut<DungeonRng>,
+    sprite_assets: Res<SpriteAssets>,
+    images: Res<Assets<Image>>,
 ) {
     let floor = current_floor.number();
     let roll: f32 = dungeon_rng.0.random();
-    let count = enemy_count_random(config.enemy.min_count, config.enemy.max_count, roll);
+    let count = crate::plugins::combat::enemy_count_random(
+        config.enemy.min_count,
+        config.enemy.max_count,
+        roll,
+    );
 
-    spawn_enemy_batch(&mut commands, &floor_map, &config, &mut dungeon_rng, floor, count);
+    let (sx, sy) = floor_map.spawn_point;
+    let tile_size = config.dungeon.tile_size;
+    let player_pos = Vec2::new(sx as f32 * tile_size, sy as f32 * tile_size);
+
+    spawn_enemy_batch(
+        &mut commands,
+        &floor_map,
+        &config,
+        &mut dungeon_rng,
+        floor,
+        count,
+        player_pos,
+        &sprite_assets,
+        &images,
+    );
 
     // リスポーンタイマー初期化
     commands.insert_resource(RespawnTimer {
@@ -57,6 +86,7 @@ fn spawn_enemies(
     info!("Spawned {} enemies on floor {}", count, floor);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_enemy_batch(
     commands: &mut Commands,
     floor_map: &FloorMap,
@@ -64,9 +94,12 @@ fn spawn_enemy_batch(
     dungeon_rng: &mut ResMut<DungeonRng>,
     floor: u32,
     count: u32,
+    player_pos: Vec2,
+    sprite_assets: &SpriteAssets,
+    images: &Assets<Image>,
 ) {
-    let (hp, atk, def, speed) = slime_stats(floor, &config.enemy);
     let tile_size = config.dungeon.tile_size;
+    let min_dist = MIN_SPAWN_DISTANCE_TILES * tile_size;
 
     let available_rooms = if floor_map.rooms.len() > 1 {
         &floor_map.rooms[1..]
@@ -78,49 +111,86 @@ fn spawn_enemy_batch(
         return;
     }
 
+    // 部屋をプレイヤーからの距離が遠い順にソート（インデックス配列）
+    let mut room_indices: Vec<usize> = (0..available_rooms.len()).collect();
+    room_indices.sort_by(|&a, &b| {
+        let (ca_x, ca_y) = available_rooms[a].center();
+        let (cb_x, cb_y) = available_rooms[b].center();
+        let dist_a = Vec2::new(ca_x as f32 * tile_size, ca_y as f32 * tile_size)
+            .distance_squared(player_pos);
+        let dist_b = Vec2::new(cb_x as f32 * tile_size, cb_y as f32 * tile_size)
+            .distance_squared(player_pos);
+        dist_b
+            .partial_cmp(&dist_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
     for i in 0..count {
-        let room = &available_rooms[i as usize % available_rooms.len()];
+        let kind_roll: f32 = dungeon_rng.0.random();
+        let kind = determine_enemy_kind(floor, kind_roll);
+        let meta = &ENEMY_KIND_META[kind.meta_index()];
+        let (hp, atk, def, speed) = enemy_stats(kind, floor, &config.enemy);
 
-        let rx = dungeon_rng.0.random_range(room.x + 1..room.x + room.width - 1);
-        let ry = dungeon_rng.0.random_range(room.y + 1..room.y + room.height - 1);
+        // 遠い部屋から優先的に使用
+        let room_idx = room_indices[i as usize % room_indices.len()];
+        let room = &available_rooms[room_idx];
 
-        let (spawn_x, spawn_y) = if floor_map.rooms.len() == 1 {
-            let (sx, sy) = floor_map.spawn_point;
-            let corners = [
-                (room.x + 1, room.y + 1),
-                (room.x + room.width - 2, room.y + 1),
-                (room.x + 1, room.y + room.height - 2),
-                (room.x + room.width - 2, room.y + room.height - 2),
-            ];
-            let fallback = (rx, ry);
-            let best = corners
-                .iter()
-                .max_by_key(|(cx, cy)| {
-                    let dx = *cx - sx;
-                    let dy = *cy - sy;
-                    dx * dx + dy * dy
-                })
-                .unwrap_or(&fallback);
-            let offset_x = dungeon_rng.0.random_range(-1..=1);
-            let offset_y = dungeon_rng.0.random_range(-1..=1);
-            let fx = (best.0 + offset_x).clamp(room.x + 1, room.x + room.width - 2);
-            let fy = (best.1 + offset_y).clamp(room.y + 1, room.y + room.height - 2);
-            (fx, fy)
-        } else {
-            (rx, ry)
-        };
+        // 部屋内でプレイヤーから十分離れた位置を探す
+        let mut spawn_x = 0;
+        let mut spawn_y = 0;
+        let mut found_good_pos = false;
+
+        for _ in 0..SPAWN_POSITION_RETRIES {
+            let rx = dungeon_rng
+                .0
+                .random_range(room.x + 1..room.x + room.width - 1);
+            let ry = dungeon_rng
+                .0
+                .random_range(room.y + 1..room.y + room.height - 1);
+            let candidate = Vec2::new(rx as f32 * tile_size, ry as f32 * tile_size);
+            if candidate.distance(player_pos) >= min_dist {
+                spawn_x = rx;
+                spawn_y = ry;
+                found_good_pos = true;
+                break;
+            }
+            spawn_x = rx;
+            spawn_y = ry;
+        }
+
+        // リトライでも良い位置が見つからなかった場合、他の遠い部屋を試す
+        if !found_good_pos {
+            for &alt_idx in &room_indices {
+                let alt_room = &available_rooms[alt_idx];
+                let (cx, cy) = alt_room.center();
+                let center_pos = Vec2::new(cx as f32 * tile_size, cy as f32 * tile_size);
+                if center_pos.distance(player_pos) >= min_dist {
+                    let rx = dungeon_rng
+                        .0
+                        .random_range(alt_room.x + 1..alt_room.x + alt_room.width - 1);
+                    let ry = dungeon_rng
+                        .0
+                        .random_range(alt_room.y + 1..alt_room.y + alt_room.height - 1);
+                    spawn_x = rx;
+                    spawn_y = ry;
+                    break;
+                }
+            }
+        }
+
+        let (cr, cg, cb) = meta.color;
 
         commands.spawn((
-            Sprite::from_color(
-                Color::srgb(0.2, 0.8, 0.3),
+            make_sprite(
+                sprite_assets.enemy_handle(kind),
+                images,
+                Color::srgb(cr, cg, cb),
+                Color::WHITE,
                 Vec2::splat(tile_size * 0.7),
             ),
-            Transform::from_xyz(
-                spawn_x as f32 * tile_size,
-                spawn_y as f32 * tile_size,
-                1.0,
-            ),
+            Transform::from_xyz(spawn_x as f32 * tile_size, spawn_y as f32 * tile_size, 1.0),
             Enemy,
+            kind,
             FloorEntity,
             Health {
                 current: hp,
@@ -132,13 +202,19 @@ fn spawn_enemy_batch(
             AiState::Idle,
             WanderTimer(0.0),
             WanderDirection(Vec2::ZERO),
-            DetectionRadius(config.enemy.slime_detection_radius),
-            AttackRange(config.enemy.slime_attack_range),
-            AttackCooldown {
-                remaining: 0.0,
-                duration: config.enemy.slime_attack_cooldown,
-            },
-            ChaseLostTimer(0.0),
+            (
+                WanderInterval {
+                    min: meta.wander_min,
+                    max: meta.wander_max,
+                },
+                DetectionRadius(config.enemy.slime_detection_radius * meta.detection_mult),
+                AttackRange(config.enemy.slime_attack_range * meta.attack_range_mult),
+                AttackCooldown {
+                    remaining: 0.0,
+                    duration: config.enemy.slime_attack_cooldown * meta.attack_cooldown,
+                },
+                ChaseLostTimer(0.0),
+            ),
         ));
     }
 }
@@ -148,11 +224,14 @@ fn respawn_enemies(
     mut commands: Commands,
     time: Res<Time>,
     mut timer: ResMut<RespawnTimer>,
-    enemy_query: Query<(), With<Enemy>>,
+    enemy_query: Query<(), (With<Enemy>, Without<Dead>)>,
+    player_query: Query<&Transform, With<Player>>,
     floor_map: Res<FloorMap>,
     current_floor: Res<CurrentFloor>,
     config: Res<GameConfig>,
     mut dungeon_rng: ResMut<DungeonRng>,
+    sprite_assets: Res<SpriteAssets>,
+    images: Res<Assets<Image>>,
 ) {
     timer.remaining -= time.delta_secs();
     if timer.remaining > 0.0 {
@@ -165,6 +244,11 @@ fn respawn_enemies(
         return;
     }
 
+    let Ok(player_transform) = player_query.single() else {
+        return;
+    };
+    let player_pos = player_transform.translation.truncate();
+
     let spawn_count = config.enemy.min_count - current_count;
     let floor = current_floor.number();
 
@@ -175,6 +259,9 @@ fn respawn_enemies(
         &mut dungeon_rng,
         floor,
         spawn_count,
+        player_pos,
+        &sprite_assets,
+        &images,
     );
 
     info!(
@@ -189,6 +276,7 @@ fn enemy_ai(
     time: Res<Time>,
     floor_map: Res<FloorMap>,
     config: Res<GameConfig>,
+    effects: Res<ActiveCharmEffects>,
     player_query: Query<&Transform, With<Player>>,
     mut enemy_query: Query<
         (
@@ -200,8 +288,9 @@ fn enemy_ai(
             &mut WanderTimer,
             &mut WanderDirection,
             &mut ChaseLostTimer,
+            &WanderInterval,
         ),
-        With<Enemy>,
+        (With<Enemy>, Without<Dead>),
     >,
     mut dungeon_rng: ResMut<DungeonRng>,
 ) {
@@ -220,11 +309,12 @@ fn enemy_ai(
         mut wander_timer,
         mut wander_dir,
         mut chase_lost,
+        wander_interval,
     ) in &mut enemy_query
     {
         let enemy_pos = transform.translation.truncate();
         let distance = enemy_pos.distance(player_pos);
-        let detection_px = detection_radius.0 * tile_size;
+        let detection_px = detection_radius.0 * tile_size * (1.0 - effects.0.detection_reduction);
 
         let enemy_tile = pixel_to_tile(enemy_pos, tile_size);
         let player_tile = pixel_to_tile(player_pos, tile_size);
@@ -241,7 +331,9 @@ fn enemy_ai(
                     wander_timer.0 -= time.delta_secs();
                     if wander_timer.0 <= 0.0 {
                         *ai_state = AiState::Wander;
-                        wander_timer.0 = dungeon_rng.0.random_range(2.0..4.0);
+                        wander_timer.0 = dungeon_rng
+                            .0
+                            .random_range(wander_interval.min..wander_interval.max);
                         let angle: f32 = dungeon_rng.0.random_range(0.0..std::f32::consts::TAU);
                         wander_dir.0 = Vec2::new(angle.cos(), angle.sin());
                     }
@@ -255,7 +347,9 @@ fn enemy_ai(
                     wander_timer.0 -= time.delta_secs();
                     if wander_timer.0 <= 0.0 {
                         *ai_state = AiState::Idle;
-                        wander_timer.0 = dungeon_rng.0.random_range(2.0..4.0);
+                        wander_timer.0 = dungeon_rng
+                            .0
+                            .random_range(wander_interval.min..wander_interval.max);
                     }
                 }
             }
@@ -266,7 +360,9 @@ fn enemy_ai(
                         || distance > detection_px * 1.2
                     {
                         *ai_state = AiState::Idle;
-                        wander_timer.0 = dungeon_rng.0.random_range(2.0..4.0);
+                        wander_timer.0 = dungeon_rng
+                            .0
+                            .random_range(wander_interval.min..wander_interval.max);
                         chase_lost.0 = 0.0;
                     }
                 } else {
@@ -291,7 +387,7 @@ fn enemy_movement(
     player_query: Query<&Transform, With<Player>>,
     mut enemy_query: Query<
         (&mut Transform, &Speed, &AiState, &WanderDirection),
-        (With<Enemy>, Without<Player>),
+        (With<Enemy>, Without<Player>, Without<Dead>),
     >,
 ) {
     let Ok(player_transform) = player_query.single() else {
@@ -322,17 +418,19 @@ fn enemy_movement(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn enemy_attack(
     player_query: Query<(Entity, &Transform, &Defense), With<Player>>,
     mut enemy_query: Query<
         (
+            Entity,
             &Transform,
             &Attack,
             &mut AttackCooldown,
             &AiState,
             &AttackRange,
         ),
-        With<Enemy>,
+        (With<Enemy>, Without<Dead>),
     >,
     mut damage_events: MessageWriter<DamageEvent>,
 ) {
@@ -341,7 +439,8 @@ fn enemy_attack(
     };
     let player_pos = player_transform.translation.truncate();
 
-    for (transform, attack, mut cooldown, ai_state, attack_range) in &mut enemy_query {
+    for (enemy_entity, transform, attack, mut cooldown, ai_state, attack_range) in &mut enemy_query
+    {
         if *ai_state != AiState::Attack {
             continue;
         }
@@ -352,7 +451,7 @@ fn enemy_attack(
         if distance <= attack_range.0 && cooldown.remaining <= 0.0 {
             let damage = calculate_damage(attack.0, player_defense.0);
             damage_events.write(DamageEvent {
-                source: Entity::PLACEHOLDER,
+                source: enemy_entity,
                 target: player_entity,
                 amount: damage,
             });

@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 use crate::components::CameraFollow;
+use crate::plugins::feedback::ScreenShake;
 use crate::states::GameState;
 
 pub struct CameraPlugin;
@@ -16,13 +17,19 @@ fn spawn_camera(mut commands: Commands, existing: Query<(), With<Camera2d>>) {
     if !existing.is_empty() {
         return;
     }
-    commands.spawn(Camera2d);
+    commands
+        .spawn(Camera2d)
+        .insert(Projection::Orthographic(OrthographicProjection {
+            scale: 0.5,
+            ..OrthographicProjection::default_2d()
+        }));
 }
 
 fn camera_follow(
     player_query: Query<&Transform, With<CameraFollow>>,
     mut camera_query: Query<&mut Transform, (With<Camera2d>, Without<CameraFollow>)>,
     time: Res<Time>,
+    shake: Res<ScreenShake>,
 ) {
     let Ok(player_transform) = player_query.single() else {
         return;
@@ -40,4 +47,13 @@ fn camera_follow(
     let lerp_speed = 5.0;
     let t = (lerp_speed * time.delta_secs()).min(1.0);
     camera_transform.translation = camera_transform.translation.lerp(target, t);
+
+    if shake.remaining > 0.0 && shake.initial_duration > 0.0 {
+        let elapsed = time.elapsed_secs();
+        let decay = shake.remaining / shake.initial_duration;
+        let offset_x = (elapsed * 73.0).sin() * shake.intensity * decay;
+        let offset_y = (elapsed * 97.0).cos() * shake.intensity * decay;
+        camera_transform.translation.x += offset_x;
+        camera_transform.translation.y += offset_y;
+    }
 }

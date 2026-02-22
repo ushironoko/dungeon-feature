@@ -29,3 +29,17 @@ pub struct AttackRange(pub f32);
 
 #[derive(Component, Clone, Copy)]
 pub struct ChaseLostTimer(pub f32);
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EnemyKind {
+    #[default]
+    Slime,
+    Bat,
+    Golem,
+}
+
+#[derive(Component, Clone, Copy)]
+pub struct WanderInterval {
+    pub min: f32,
+    pub max: f32,
+}

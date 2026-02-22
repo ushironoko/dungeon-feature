@@ -28,6 +28,7 @@ pub enum PlayingSet {
     Player,
     Enemy,
     Combat,
+    CombatFeedback,
     Item,
     PostCombat,
 }

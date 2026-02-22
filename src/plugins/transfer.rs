@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use crate::components::item::{DroppedItem, Item, ItemLevel, ItemRarity, ItemSpec, ItemType};
 use crate::config::GameConfig;
 use crate::plugins::item::{rarity_color, recompute_item_value};
+use crate::resources::sprite_assets::{SpriteAssets, make_sprite};
 use crate::resources::transfer_state::{FutureTransferItem, PastTransferItem, TransferState};
 use crate::resources::{CurrentFloor, DungeonRng, FloorMap};
 use crate::states::FloorTransitionSetup;
@@ -71,17 +72,17 @@ pub fn add_past_transfer(state: &mut TransferState, spec: ItemSpec, source_floor
 pub fn add_ending_carryover(state: &mut TransferState, spec: ItemSpec) -> bool {
     for slot in &mut state.past_items {
         if slot.is_none() {
-            *slot = Some(PastTransferItem { spec, source_floor: 1 });
+            *slot = Some(PastTransferItem {
+                spec,
+                source_floor: 1,
+            });
             return true;
         }
     }
     false
 }
 
-pub fn collect_items_for_floor(
-    state: &mut TransferState,
-    floor: u32,
-) -> Vec<FutureTransferItem> {
+pub fn collect_items_for_floor(state: &mut TransferState, floor: u32) -> Vec<FutureTransferItem> {
     let mut result = Vec::new();
     for slot in &mut state.future_items {
         if let Some(item) = slot
@@ -96,6 +97,7 @@ pub fn collect_items_for_floor(
 
 // --- Systems ---
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_transferred_items(
     mut commands: Commands,
     mut transfer_state: ResMut<TransferState>,
@@ -103,6 +105,8 @@ fn spawn_transferred_items(
     floor_map: Res<FloorMap>,
     config: Res<GameConfig>,
     mut rng: ResMut<DungeonRng>,
+    sprite_assets: Res<SpriteAssets>,
+    images: Res<Assets<Image>>,
 ) {
     let floor = current_floor.number();
     let tile_size = config.dungeon.tile_size;
@@ -115,13 +119,23 @@ fn spawn_transferred_items(
         let mut boosted_spec = item.spec;
         boosted_spec.level = boosted_level;
         boosted_spec.value = recompute_item_value(&boosted_spec, &config.item);
-        spawn_transfer_item(&mut commands, &floor_map, &mut rng, boosted_spec, tile_size, sprite_size);
+        spawn_transfer_item(
+            &mut commands,
+            &floor_map,
+            &mut rng,
+            boosted_spec,
+            tile_size,
+            sprite_size,
+            &sprite_assets,
+            &images,
+        );
     }
 
     // 過去送りアイテムは reset_for_new_run で future_items に変換済み
     // （未来送りと同じフローでスポーンされる）
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_transfer_item(
     commands: &mut Commands,
     floor_map: &FloorMap,
@@ -129,6 +143,8 @@ fn spawn_transfer_item(
     spec: ItemSpec,
     tile_size: f32,
     sprite_size: f32,
+    sprite_assets: &SpriteAssets,
+    images: &Assets<Image>,
 ) {
     // ランダムな部屋にスポーン
     if floor_map.rooms.is_empty() {
@@ -142,7 +158,13 @@ fn spawn_transfer_item(
     let color = rarity_color(spec.rarity);
 
     commands.spawn((
-        Sprite::from_color(color, Vec2::splat(sprite_size)),
+        make_sprite(
+            sprite_assets.item_handle(spec.kind),
+            images,
+            color,
+            color,
+            Vec2::splat(sprite_size),
+        ),
         Transform::from_xyz(x as f32 * tile_size, y as f32 * tile_size, 0.5),
         Item,
         ItemType(spec.kind),
@@ -174,8 +196,8 @@ mod tests {
     #[test]
     fn test_future_transfer_level() {
         // Lv = D + (D - S): 複利的レベルブースト
-        assert_eq!(future_transfer_level(5, 8), 11);   // 8 + 3
-        assert_eq!(future_transfer_level(8, 15), 22);  // 15 + 7
+        assert_eq!(future_transfer_level(5, 8), 11); // 8 + 3
+        assert_eq!(future_transfer_level(8, 15), 22); // 15 + 7
         assert_eq!(future_transfer_level(15, 30), 45); // 30 + 15
     }
 

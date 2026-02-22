@@ -3,6 +3,7 @@ pub mod combat;
 mod core;
 mod dungeon;
 pub mod enemy;
+pub mod feedback;
 mod hud;
 mod inventory;
 pub mod item;
@@ -27,6 +28,7 @@ impl PluginGroup for DungeonFeaturePlugins {
             .add(item::ItemPlugin)
             .add(hud::HudPlugin)
             .add(camera::CameraPlugin)
+            .add(feedback::FeedbackPlugin)
             .add(inventory::InventoryPlugin)
             .add(transfer::TransferPlugin)
     }

@@ -1,13 +1,14 @@
 use bevy::prelude::*;
 
 use crate::components::item::{
-    DroppedItem, Item, ItemKind, ItemLevel, ItemRarity, ItemSpec, ItemType, Rarity,
+    DroppedItem, EquipSlot, Item, ItemKind, ItemLevel, ItemRarity, ItemSpec, ItemType, Rarity,
 };
 use crate::components::{Attack, Defense, Health, Player};
 use crate::config::{GameConfig, ItemConfig};
 use crate::events::EnemyDeathMessage;
 use crate::resources::player_state::{Equipment, Inventory, PlayerState};
-use crate::resources::DungeonRng;
+use crate::resources::sprite_assets::{SpriteAssets, make_sprite};
+use crate::resources::{ActiveCharmEffects, DungeonRng};
 use crate::states::{GameState, PlayingSet};
 use rand::Rng;
 
@@ -21,7 +22,59 @@ impl Plugin for ItemPlugin {
                 .chain()
                 .in_set(PlayingSet::Item)
                 .run_if(in_state(GameState::Playing)),
+        )
+        .add_systems(
+            Update,
+            sync_charm_effects
+                .in_set(PlayingSet::PostCombat)
+                .run_if(in_state(GameState::Playing)),
         );
+    }
+}
+
+// --- Charm Effects ---
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CharmEffects {
+    pub regen_interval: f32,
+    pub regen_amount: u32,
+    pub drop_bonus: f32,
+    pub detection_reduction: f32,
+    pub cooldown_reduction: f32,
+}
+
+pub fn charm_effects(charm: Option<&ItemSpec>) -> CharmEffects {
+    let Some(charm) = charm else {
+        return CharmEffects::default();
+    };
+    if charm.kind != ItemKind::Charm {
+        return CharmEffects::default();
+    }
+    match charm.rarity {
+        Rarity::Common => CharmEffects {
+            regen_interval: 5.0,
+            regen_amount: 1,
+            ..Default::default()
+        },
+        Rarity::Uncommon => CharmEffects {
+            drop_bonus: 0.15,
+            ..Default::default()
+        },
+        Rarity::Rare => CharmEffects {
+            detection_reduction: 0.3,
+            ..Default::default()
+        },
+        Rarity::Epic => CharmEffects {
+            cooldown_reduction: 0.2,
+            ..Default::default()
+        },
+        Rarity::Legendary => CharmEffects {
+            regen_interval: 5.0,
+            regen_amount: 1,
+            drop_bonus: 0.15,
+            detection_reduction: 0.3,
+            cooldown_reduction: 0.2,
+        },
     }
 }
 
@@ -90,10 +143,14 @@ pub fn determine_item_kind(roll: f32) -> ItemKind {
 }
 
 pub fn effective_attack(base: u32, equipment: &Equipment, config: &ItemConfig) -> u32 {
-    let weapon_bonus = equipment
-        .weapon
-        .as_ref()
-        .map_or(0, |w| compute_stat_value(config.weapon_base_stat, w.rarity, w.level, config.stat_level_scaling));
+    let weapon_bonus = equipment.weapon.as_ref().map_or(0, |w| {
+        compute_stat_value(
+            config.weapon_base_stat,
+            w.rarity,
+            w.level,
+            config.stat_level_scaling,
+        )
+    });
     base + weapon_bonus
 }
 
@@ -107,7 +164,14 @@ pub fn effective_defense(base: u32, equipment: &Equipment, config: &ItemConfig) 
     let total_bonus: u32 = defense_slots
         .iter()
         .filter_map(|slot| slot.as_ref())
-        .map(|spec| compute_stat_value(config.armor_base_stat, spec.rarity, spec.level, config.stat_level_scaling))
+        .map(|spec| {
+            compute_stat_value(
+                config.armor_base_stat,
+                spec.rarity,
+                spec.level,
+                config.stat_level_scaling,
+            )
+        })
         .sum();
     base + total_bonus
 }
@@ -154,6 +218,31 @@ pub fn recompute_item_value(spec: &ItemSpec, config: &ItemConfig) -> u32 {
     compute_stat_value(base, spec.rarity, spec.level, config.stat_level_scaling)
 }
 
+pub fn item_kind_label(kind: ItemKind) -> &'static str {
+    match kind {
+        ItemKind::Weapon => "武器",
+        ItemKind::Head => "頭",
+        ItemKind::Torso => "胴",
+        ItemKind::Legs => "足",
+        ItemKind::Shield => "盾",
+        ItemKind::Charm => "装飾",
+        ItemKind::Backpack => "背嚢",
+        ItemKind::HealthPotion => "回復薬",
+    }
+}
+
+pub fn equip_slot_label(slot: EquipSlot) -> &'static str {
+    match slot {
+        EquipSlot::Weapon => "武器",
+        EquipSlot::Head => "頭",
+        EquipSlot::Torso => "胴",
+        EquipSlot::Legs => "足",
+        EquipSlot::Shield => "盾",
+        EquipSlot::Charm => "装飾",
+        EquipSlot::Backpack => "背嚢",
+    }
+}
+
 pub fn rarity_color(rarity: Rarity) -> Color {
     match rarity {
         Rarity::Common => Color::srgb(0.8, 0.8, 0.8),
@@ -181,10 +270,14 @@ fn spawn_item_drop(
     mut events: MessageReader<EnemyDeathMessage>,
     mut rng: ResMut<DungeonRng>,
     config: Res<GameConfig>,
+    effects: Res<ActiveCharmEffects>,
+    sprite_assets: Res<SpriteAssets>,
+    images: Res<Assets<Image>>,
 ) {
     for event in events.read() {
         let drop_roll: f32 = rng.0.random();
-        if drop_roll >= config.item.drop_rate {
+        let effective_drop_rate = config.item.drop_rate + effects.0.drop_bonus;
+        if drop_roll >= effective_drop_rate {
             continue;
         }
 
@@ -207,7 +300,13 @@ fn spawn_item_drop(
         let color = rarity_color(rarity);
 
         commands.spawn((
-            Sprite::from_color(color, Vec2::splat(sprite_size)),
+            make_sprite(
+                sprite_assets.item_handle(kind),
+                &images,
+                color,
+                color,
+                Vec2::splat(sprite_size),
+            ),
             Transform::from_xyz(event.position.x, event.position.y, 0.5),
             Item,
             ItemType(kind),
@@ -229,10 +328,7 @@ fn spawn_item_drop(
 fn item_pickup(
     mut commands: Commands,
     mut player_query: Query<(&Transform, &mut Health), With<Player>>,
-    item_query: Query<
-        (Entity, &Transform, &ItemType, &ItemRarity, &ItemLevel),
-        With<DroppedItem>,
-    >,
+    item_query: Query<(Entity, &Transform, &ItemType, &ItemRarity, &ItemLevel), With<DroppedItem>>,
     mut player_state: ResMut<PlayerState>,
     config: Res<GameConfig>,
 ) {
@@ -302,10 +398,7 @@ fn item_pickup(
                             );
                         }
                     } else if !try_add_to_inventory(&mut player_state.inventory, spec) {
-                        info!(
-                            "Inventory full, discarded {:?}(+{})",
-                            spec.kind, spec.value
-                        );
+                        info!("Inventory full, discarded {:?}(+{})", spec.kind, spec.value);
                     }
                 }
             }
@@ -326,6 +419,16 @@ fn update_player_stats(
 
     attack.0 = effective_attack(config.player.attack, &player_state.equipment, &config.item);
     defense.0 = effective_defense(config.player.defense, &player_state.equipment, &config.item);
+}
+
+fn sync_charm_effects(
+    player_state: Res<PlayerState>,
+    mut active_effects: ResMut<ActiveCharmEffects>,
+) {
+    if !player_state.is_changed() {
+        return;
+    }
+    active_effects.0 = charm_effects(player_state.equipment.charm.as_ref());
 }
 
 #[cfg(test)]
@@ -525,5 +628,47 @@ mod tests {
         // HealthPotion: base=20, Common, level=5, scaling=0.1 → 20 * 1.0 * 1.5 = 30
         let spec = make_spec(ItemKind::HealthPotion, Rarity::Common, 5, 0);
         assert_eq!(recompute_item_value(&spec, &config), 30);
+    }
+
+    #[test]
+    fn test_charm_effects_common() {
+        let spec = ItemSpec {
+            kind: ItemKind::Charm,
+            rarity: Rarity::Common,
+            level: 1,
+            value: 1,
+        };
+        let effects = charm_effects(Some(&spec));
+        assert!(effects.regen_interval > 0.0);
+        assert_eq!(effects.regen_amount, 1);
+        assert_eq!(effects.drop_bonus, 0.0);
+        assert_eq!(effects.detection_reduction, 0.0);
+        assert_eq!(effects.cooldown_reduction, 0.0);
+    }
+
+    #[test]
+    fn test_charm_effects_legendary() {
+        let spec = ItemSpec {
+            kind: ItemKind::Charm,
+            rarity: Rarity::Legendary,
+            level: 1,
+            value: 1,
+        };
+        let effects = charm_effects(Some(&spec));
+        assert!(effects.regen_interval > 0.0);
+        assert_eq!(effects.regen_amount, 1);
+        assert!(effects.drop_bonus > 0.0);
+        assert!(effects.detection_reduction > 0.0);
+        assert!(effects.cooldown_reduction > 0.0);
+    }
+
+    #[test]
+    fn test_charm_effects_none() {
+        let effects = charm_effects(None);
+        assert_eq!(effects.regen_interval, 0.0);
+        assert_eq!(effects.regen_amount, 0);
+        assert_eq!(effects.drop_bonus, 0.0);
+        assert_eq!(effects.detection_reduction, 0.0);
+        assert_eq!(effects.cooldown_reduction, 0.0);
     }
 }
