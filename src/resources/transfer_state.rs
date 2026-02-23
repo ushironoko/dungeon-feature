@@ -49,7 +49,11 @@ impl TransferState {
 
             if let Some(item) = self.past_items[i] {
                 let max_floor = item.source_floor.saturating_sub(1).max(1);
-                let spawn_floor = if max_floor <= 1 { 1 } else { rng.random_range(1..=max_floor) };
+                let spawn_floor = if max_floor <= 1 {
+                    1
+                } else {
+                    rng.random_range(1..=max_floor)
+                };
                 let mut resolved_spec = item.spec;
                 resolved_spec.level = spawn_floor;
 

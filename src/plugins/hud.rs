@@ -1,13 +1,14 @@
 use bevy::prelude::*;
 
 use crate::components::hud::{
-    EquipmentText, FloorText, HpBarFill, HudRoot, HudTransferChargeText,
+    DashStateText, EquipmentText, FloorText, HpBarFill, HudRoot, HudTransferChargeText,
 };
-use crate::components::{Health, Player};
+use crate::components::{DashActive, Health, Player};
 use crate::plugins::item::rarity_prefix;
+use crate::resources::CurrentFloor;
+use crate::resources::font::GameFont;
 use crate::resources::player_state::PlayerState;
 use crate::resources::transfer_state::TransferState;
-use crate::resources::CurrentFloor;
 use crate::states::{GameState, PlayingSet};
 
 pub struct HudPlugin;
@@ -24,6 +25,7 @@ impl Plugin for HudPlugin {
                     update_floor_text,
                     update_equipment_text,
                     update_transfer_charge_text,
+                    update_dash_state_text,
                 )
                     .in_set(PlayingSet::PostCombat)
                     .run_if(in_state(GameState::Playing)),
@@ -31,11 +33,16 @@ impl Plugin for HudPlugin {
     }
 }
 
-fn spawn_hud(mut commands: Commands, existing: Query<Entity, With<HudRoot>>) {
+fn spawn_hud(
+    mut commands: Commands,
+    existing: Query<Entity, With<HudRoot>>,
+    game_font: Res<GameFont>,
+) {
     if !existing.is_empty() {
         return;
     }
 
+    let font = game_font.0.clone();
     commands
         .spawn((
             HudRoot,
@@ -78,6 +85,7 @@ fn spawn_hud(mut commands: Commands, existing: Query<Entity, With<HudRoot>>) {
                 FloorText,
                 Text::new("Floor: 1"),
                 TextFont {
+                    font: font.clone(),
                     font_size: 16.0,
                     ..default()
                 },
@@ -89,6 +97,7 @@ fn spawn_hud(mut commands: Commands, existing: Query<Entity, With<HudRoot>>) {
                 EquipmentText,
                 Text::new("Equipment: None"),
                 TextFont {
+                    font: font.clone(),
                     font_size: 14.0,
                     ..default()
                 },
@@ -100,10 +109,23 @@ fn spawn_hud(mut commands: Commands, existing: Query<Entity, With<HudRoot>>) {
                 HudTransferChargeText,
                 Text::new("Transfer: 5"),
                 TextFont {
+                    font: font.clone(),
                     font_size: 14.0,
                     ..default()
                 },
                 TextColor(Color::srgb(0.5, 0.8, 1.0)),
+            ));
+
+            // ダッシュ状態テキスト
+            parent.spawn((
+                DashStateText,
+                Text::new(""),
+                TextFont {
+                    font: font.clone(),
+                    font_size: 14.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(1.0, 0.8, 0.3)),
             ));
         });
 }
@@ -178,4 +200,15 @@ fn update_transfer_charge_text(
         return;
     };
     **text = format!("Transfer: {}", transfer_state.charges);
+}
+
+fn update_dash_state_text(dash: Res<DashActive>, mut query: Query<&mut Text, With<DashStateText>>) {
+    let Ok(mut text) = query.single_mut() else {
+        return;
+    };
+    **text = if dash.0 {
+        "DASH".to_string()
+    } else {
+        String::new()
+    };
 }

@@ -14,3 +14,6 @@ pub struct FacingDirection(pub Vec2);
 
 #[derive(Component)]
 pub struct CameraFollow;
+
+#[derive(Resource, Default)]
+pub struct DashActive(pub bool);

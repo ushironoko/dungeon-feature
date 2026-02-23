@@ -1,10 +1,12 @@
 use bevy::prelude::*;
 
 use crate::config::GameConfig;
-use crate::events::{DamageEvent, EnemyDeathMessage};
+use crate::events::{DamageApplied, DamageEvent, EnemyDeathMessage};
+use crate::resources::font::GameFont;
 use crate::resources::player_state::PlayerState;
+use crate::resources::sprite_assets::SpriteAssets;
 use crate::resources::transfer_state::TransferState;
-use crate::resources::{CurrentFloor, DungeonRng};
+use crate::resources::{ActiveCharmEffects, CurrentFloor, DungeonRng, RegenTimer};
 use crate::states::{FloorTransitionSetup, GameState, PlayingSet};
 
 pub struct CorePlugin;
@@ -18,14 +20,18 @@ impl Plugin for CorePlugin {
             inventory: Default::default(),
         };
         let transfer_state = TransferState::new(config.transfer.charges_per_run);
-        app.init_state::<GameState>()
+        app.add_systems(Startup, (load_game_font, load_sprite_assets))
+            .init_state::<GameState>()
             .insert_resource(config)
             .init_resource::<CurrentFloor>()
             .init_resource::<DungeonRng>()
             .insert_resource(player_state)
             .insert_resource(transfer_state)
             .add_message::<DamageEvent>()
+            .add_message::<DamageApplied>()
             .add_message::<EnemyDeathMessage>()
+            .init_resource::<ActiveCharmEffects>()
+            .init_resource::<RegenTimer>()
             .configure_sets(
                 OnEnter(GameState::FloorTransition),
                 (
@@ -44,6 +50,7 @@ impl Plugin for CorePlugin {
                     PlayingSet::Player,
                     PlayingSet::Enemy,
                     PlayingSet::Combat,
+                    PlayingSet::CombatFeedback,
                     PlayingSet::Item,
                     PlayingSet::PostCombat,
                 )
@@ -56,6 +63,29 @@ impl Plugin for CorePlugin {
                 return_to_playing.in_set(FloorTransitionSetup::Complete),
             );
     }
+}
+
+fn load_game_font(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let font = asset_server.load("fonts/NotoSansJP-Regular.otf");
+    commands.insert_resource(GameFont(font));
+}
+
+fn load_sprite_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.insert_resource(SpriteAssets {
+        player: asset_server.load("sprites/player.png"),
+        slime: asset_server.load("sprites/enemies/slime.png"),
+        bat: asset_server.load("sprites/enemies/bat.png"),
+        golem: asset_server.load("sprites/enemies/golem.png"),
+        item_weapon: asset_server.load("sprites/items/weapon.png"),
+        item_head: asset_server.load("sprites/items/head.png"),
+        item_torso: asset_server.load("sprites/items/torso.png"),
+        item_legs: asset_server.load("sprites/items/legs.png"),
+        item_shield: asset_server.load("sprites/items/shield.png"),
+        item_charm: asset_server.load("sprites/items/charm.png"),
+        item_backpack: asset_server.load("sprites/items/backpack.png"),
+        item_potion: asset_server.load("sprites/items/potion.png"),
+        attack_sword: asset_server.load("sprites/attack_sword.png"),
+    });
 }
 
 fn skip_to_menu(mut next_state: ResMut<NextState<GameState>>) {

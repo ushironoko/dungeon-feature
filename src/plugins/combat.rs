@@ -1,8 +1,10 @@
 use bevy::prelude::*;
 
-use crate::components::{AttackCooldown, AttackEffect, Enemy, Health, InvincibilityTimer, Player};
+use crate::components::{
+    AttackCooldown, AttackEffect, Dead, Enemy, Health, InvincibilityTimer, Player,
+};
 use crate::config::{EnemyConfig, GameConfig};
-use crate::events::{DamageEvent, EnemyDeathMessage};
+use crate::events::{DamageApplied, DamageEvent, EnemyDeathMessage};
 use crate::resources::CurrentFloor;
 use crate::states::{GameState, PlayingSet};
 
@@ -25,7 +27,82 @@ impl Plugin for CombatPlugin {
             )
                 .in_set(PlayingSet::Combat)
                 .run_if(in_state(GameState::Playing)),
+        )
+        .add_systems(
+            Update,
+            cleanup_dead
+                .in_set(PlayingSet::PostCombat)
+                .run_if(in_state(GameState::Playing)),
         );
+    }
+}
+
+// --- 静的メタデータ ---
+
+use crate::components::EnemyKind;
+
+pub struct EnemyKindMeta {
+    pub hp_mult: f32,
+    pub attack_mult: f32,
+    pub defense_mult: f32,
+    pub speed_mult: f32,
+    pub detection_mult: f32,
+    pub attack_range_mult: f32,
+    pub attack_cooldown: f32,
+    pub wander_min: f32,
+    pub wander_max: f32,
+    pub color: (f32, f32, f32),
+}
+
+pub static ENEMY_KIND_META: &[EnemyKindMeta] = &[
+    // Slime
+    EnemyKindMeta {
+        hp_mult: 1.0,
+        attack_mult: 1.0,
+        defense_mult: 1.0,
+        speed_mult: 1.0,
+        detection_mult: 1.0,
+        attack_range_mult: 1.0,
+        attack_cooldown: 1.0,
+        wander_min: 2.0,
+        wander_max: 4.0,
+        color: (0.2, 0.8, 0.3),
+    },
+    // Bat
+    EnemyKindMeta {
+        hp_mult: 0.5,
+        attack_mult: 0.8,
+        defense_mult: 0.3,
+        speed_mult: 1.8,
+        detection_mult: 1.5,
+        attack_range_mult: 1.0,
+        attack_cooldown: 0.7,
+        wander_min: 0.5,
+        wander_max: 1.5,
+        color: (0.6, 0.2, 0.8),
+    },
+    // Golem
+    EnemyKindMeta {
+        hp_mult: 3.0,
+        attack_mult: 1.5,
+        defense_mult: 2.5,
+        speed_mult: 0.5,
+        detection_mult: 0.8,
+        attack_range_mult: 1.2,
+        attack_cooldown: 2.0,
+        wander_min: 4.0,
+        wander_max: 8.0,
+        color: (0.5, 0.5, 0.55),
+    },
+];
+
+impl EnemyKind {
+    pub const fn meta_index(self) -> usize {
+        match self {
+            EnemyKind::Slime => 0,
+            EnemyKind::Bat => 1,
+            EnemyKind::Golem => 2,
+        }
     }
 }
 
@@ -82,6 +159,39 @@ pub fn slime_stats(floor: u32, config: &EnemyConfig) -> (u32, u32, u32, f32) {
     (hp, atk, def, speed)
 }
 
+/// 種別に応じたステータス計算（Slime基準 × 乗数）
+pub fn enemy_stats(kind: EnemyKind, floor: u32, config: &EnemyConfig) -> (u32, u32, u32, f32) {
+    let (base_hp, base_atk, base_def, base_speed) = slime_stats(floor, config);
+    let meta = &ENEMY_KIND_META[kind.meta_index()];
+    (
+        (base_hp as f32 * meta.hp_mult) as u32,
+        (base_atk as f32 * meta.attack_mult) as u32,
+        (base_def as f32 * meta.defense_mult) as u32,
+        base_speed * meta.speed_mult,
+    )
+}
+
+/// フロアと乱数に基づいて敵種別を決定
+pub fn determine_enemy_kind(floor: u32, roll: f32) -> EnemyKind {
+    if floor >= 15 {
+        if roll < 0.40 {
+            EnemyKind::Slime
+        } else if roll < 0.75 {
+            EnemyKind::Bat
+        } else {
+            EnemyKind::Golem
+        }
+    } else if floor >= 5 {
+        if roll < 0.60 {
+            EnemyKind::Slime
+        } else {
+            EnemyKind::Bat
+        }
+    } else {
+        EnemyKind::Slime
+    }
+}
+
 // --- Systems ---
 
 fn update_invincibility(
@@ -100,11 +210,14 @@ fn update_invincibility(
 fn process_damage(
     mut commands: Commands,
     mut events: MessageReader<DamageEvent>,
-    mut query: Query<(&mut Health, Has<InvincibilityTimer>)>,
+    mut query: Query<(&mut Health, Has<InvincibilityTimer>, &Transform)>,
+    source_query: Query<&Transform>,
     config: Res<GameConfig>,
+    mut damage_applied: MessageWriter<DamageApplied>,
 ) {
     for event in events.read() {
-        let Ok((mut health, has_invincibility)) = query.get_mut(event.target) else {
+        let Ok((mut health, has_invincibility, target_transform)) = query.get_mut(event.target)
+        else {
             continue;
         };
         if health.current == 0 {
@@ -114,21 +227,31 @@ fn process_damage(
             continue;
         }
         health.current = health.current.saturating_sub(event.amount);
+        let position = target_transform.translation.truncate();
+        let source_position = source_query
+            .get(event.source)
+            .map(|t| t.translation.truncate())
+            .unwrap_or(position);
         info!(
             "Damage: {} -> entity, HP: {}/{}",
             event.amount, health.current, health.max
         );
-        // プレイヤーのみ無敵付与（Player コンポーネントの有無で判断は不要、
-        // InvincibilityTimer を付与するだけで十分）
         commands.entity(event.target).insert(InvincibilityTimer {
             remaining: config.player.invincibility,
+        });
+        damage_applied.write(DamageApplied {
+            target: event.target,
+            amount: event.amount,
+            position,
+            source_position,
         });
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn check_death(
     mut commands: Commands,
-    enemy_query: Query<(Entity, &Health, &Transform), With<Enemy>>,
+    enemy_query: Query<(Entity, &Health, &Transform), (With<Enemy>, Without<Dead>)>,
     player_query: Query<&Health, With<Player>>,
     mut next_state: ResMut<NextState<GameState>>,
     mut enemy_death_events: MessageWriter<EnemyDeathMessage>,
@@ -143,7 +266,7 @@ fn check_death(
                 floor: current_floor.number(),
             });
             info!("Enemy defeated!");
-            commands.entity(entity).despawn();
+            commands.entity(entity).insert(Dead);
         }
     }
 
@@ -153,6 +276,12 @@ fn check_death(
             info!("Player defeated! Game Over.");
             next_state.set(GameState::GameOver);
         }
+    }
+}
+
+fn cleanup_dead(mut commands: Commands, query: Query<Entity, With<Dead>>) {
+    for entity in &query {
+        commands.entity(entity).despawn();
     }
 }
 
@@ -167,18 +296,36 @@ fn update_attack_cooldowns(time: Res<Time>, mut query: Query<&mut AttackCooldown
 fn update_attack_effects(
     mut commands: Commands,
     time: Res<Time>,
-    mut query: Query<(Entity, &mut AttackEffect)>,
+    mut query: Query<(Entity, &mut AttackEffect, &mut Transform, &mut Sprite)>,
 ) {
-    for (entity, mut effect) in &mut query {
+    for (entity, mut effect, mut transform, mut sprite) in &mut query {
         effect.remaining -= time.delta_secs();
         if effect.remaining <= 0.0 {
             commands.entity(entity).despawn();
+            continue;
+        }
+
+        let elapsed = effect.duration - effect.remaining;
+        let t = (elapsed / effect.duration).clamp(0.0, 1.0);
+
+        // 角度を線形補間
+        let angle = effect.start_angle + (effect.end_angle - effect.start_angle) * t;
+        transform.rotation = Quat::from_rotation_z(angle);
+
+        // 後半 1/3 でフェードアウト（initial_alpha 基準）
+        if t > 0.67 {
+            let fade = ((1.0 - t) / 0.33).clamp(0.0, 1.0);
+            sprite.color = sprite.color.with_alpha(effect.initial_alpha * fade);
         }
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn update_damage_visual(
-    mut query: Query<(&mut Sprite, Option<&InvincibilityTimer>), With<Health>>,
+    mut query: Query<
+        (&mut Sprite, Option<&InvincibilityTimer>),
+        (With<Health>, Without<AttackEffect>),
+    >,
 ) {
     for (mut sprite, invincibility) in &mut query {
         if invincibility.is_some() {
@@ -310,5 +457,50 @@ mod tests {
         assert_eq!(atk, 55);
         assert_eq!(def, 27);
         assert!((speed - 110.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_enemy_stats_bat() {
+        let config = default_enemy_config();
+        // Floor 5: slime base = (25, 10, round(4.5)=5, 65.0)
+        // Bat: hp*0.5=12, atk*0.8=8, def*0.3=1, speed*1.8=117.0
+        let (hp, atk, def, speed) = enemy_stats(EnemyKind::Bat, 5, &config);
+        assert_eq!(hp, 12);
+        assert_eq!(atk, 8);
+        assert_eq!(def, 1);
+        assert!((speed - 117.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_enemy_stats_golem() {
+        let config = default_enemy_config();
+        // Floor 15: slime base = (55, 20, round(9.5)=10, 75.0)
+        // Golem: hp*3.0=165, atk*1.5=30, def*2.5=25, speed*0.5=37.5
+        let (hp, atk, def, speed) = enemy_stats(EnemyKind::Golem, 15, &config);
+        assert_eq!(hp, 165);
+        assert_eq!(atk, 30);
+        assert_eq!(def, 25);
+        assert!((speed - 37.5).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_determine_enemy_kind_boundaries() {
+        // Floor 1: always Slime
+        assert_eq!(determine_enemy_kind(1, 0.0), EnemyKind::Slime);
+        assert_eq!(determine_enemy_kind(1, 0.99), EnemyKind::Slime);
+
+        // Floor 5: 60% Slime, 40% Bat
+        assert_eq!(determine_enemy_kind(5, 0.0), EnemyKind::Slime);
+        assert_eq!(determine_enemy_kind(5, 0.59), EnemyKind::Slime);
+        assert_eq!(determine_enemy_kind(5, 0.61), EnemyKind::Bat);
+        assert_eq!(determine_enemy_kind(5, 0.99), EnemyKind::Bat);
+
+        // Floor 15: 40% Slime, 35% Bat, 25% Golem
+        assert_eq!(determine_enemy_kind(15, 0.0), EnemyKind::Slime);
+        assert_eq!(determine_enemy_kind(15, 0.39), EnemyKind::Slime);
+        assert_eq!(determine_enemy_kind(15, 0.41), EnemyKind::Bat);
+        assert_eq!(determine_enemy_kind(15, 0.74), EnemyKind::Bat);
+        assert_eq!(determine_enemy_kind(15, 0.76), EnemyKind::Golem);
+        assert_eq!(determine_enemy_kind(15, 0.99), EnemyKind::Golem);
     }
 }

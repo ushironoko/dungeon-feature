@@ -1,14 +1,15 @@
 use bevy::prelude::*;
 
+use crate::components::FloorEntity;
 use crate::components::item::ItemSpec;
 use crate::components::ui::{
     ContinueWithItemButton, EndingItemButton, EndingItemSelectRoot, EndingRoot, EndingSelectedItem,
     GameOverFloorText, GameOverRoot, MenuRoot, ReturnToMenuButton, StartButton, StartFreshButton,
 };
-use crate::components::FloorEntity;
 use crate::config::GameConfig;
 use crate::plugins::item::rarity_prefix;
 use crate::plugins::transfer::add_ending_carryover;
+use crate::resources::font::GameFont;
 use crate::resources::player_state::PlayerState;
 use crate::resources::transfer_state::TransferState;
 use crate::resources::{CurrentFloor, DungeonRng};
@@ -21,10 +22,7 @@ impl Plugin for MenuPlugin {
         app.init_resource::<EndingSelectedItem>()
             .add_systems(OnEnter(GameState::Menu), spawn_menu)
             .add_systems(OnExit(GameState::Menu), cleanup_menu)
-            .add_systems(
-                Update,
-                menu_interaction.run_if(in_state(GameState::Menu)),
-            )
+            .add_systems(Update, menu_interaction.run_if(in_state(GameState::Menu)))
             .add_systems(OnEnter(GameState::GameOver), spawn_game_over)
             .add_systems(OnEnter(GameState::GameOver), cleanup_floor_on_game_over)
             .add_systems(OnExit(GameState::GameOver), cleanup_game_over)
@@ -37,13 +35,13 @@ impl Plugin for MenuPlugin {
             .add_systems(OnExit(GameState::Ending), cleanup_ending)
             .add_systems(
                 Update,
-                (ending_item_select, ending_button_interaction)
-                    .run_if(in_state(GameState::Ending)),
+                (ending_item_select, ending_button_interaction).run_if(in_state(GameState::Ending)),
             );
     }
 }
 
-fn spawn_menu(mut commands: Commands) {
+fn spawn_menu(mut commands: Commands, game_font: Res<GameFont>) {
+    let font = game_font.0.clone();
     commands
         .spawn((
             MenuRoot,
@@ -62,6 +60,7 @@ fn spawn_menu(mut commands: Commands) {
             parent.spawn((
                 Text::new("Dungeon Feature"),
                 TextFont {
+                    font: font.clone(),
                     font_size: 48.0,
                     ..default()
                 },
@@ -82,6 +81,7 @@ fn spawn_menu(mut commands: Commands) {
                     btn.spawn((
                         Text::new("Start"),
                         TextFont {
+                            font: font.clone(),
                             font_size: 24.0,
                             ..default()
                         },
@@ -116,7 +116,12 @@ fn cleanup_menu(mut commands: Commands, query: Query<Entity, With<MenuRoot>>) {
     }
 }
 
-fn spawn_game_over(mut commands: Commands, current_floor: Res<CurrentFloor>) {
+fn spawn_game_over(
+    mut commands: Commands,
+    current_floor: Res<CurrentFloor>,
+    game_font: Res<GameFont>,
+) {
+    let font = game_font.0.clone();
     commands
         .spawn((
             GameOverRoot,
@@ -135,6 +140,7 @@ fn spawn_game_over(mut commands: Commands, current_floor: Res<CurrentFloor>) {
             parent.spawn((
                 Text::new("Game Over"),
                 TextFont {
+                    font: font.clone(),
                     font_size: 48.0,
                     ..default()
                 },
@@ -145,6 +151,7 @@ fn spawn_game_over(mut commands: Commands, current_floor: Res<CurrentFloor>) {
                 GameOverFloorText,
                 Text::new(format!("Reached Floor {}", current_floor.number())),
                 TextFont {
+                    font: font.clone(),
                     font_size: 24.0,
                     ..default()
                 },
@@ -165,6 +172,7 @@ fn spawn_game_over(mut commands: Commands, current_floor: Res<CurrentFloor>) {
                     btn.spawn((
                         Text::new("Return to Menu"),
                         TextFont {
+                            font: font.clone(),
                             font_size: 20.0,
                             ..default()
                         },
@@ -201,8 +209,10 @@ fn spawn_ending(
     mut commands: Commands,
     player_state: Res<PlayerState>,
     mut selected: ResMut<EndingSelectedItem>,
+    game_font: Res<GameFont>,
 ) {
     selected.0 = None;
+    let font = game_font.0.clone();
 
     commands
         .spawn((
@@ -223,6 +233,7 @@ fn spawn_ending(
             parent.spawn((
                 Text::new("The treasure chest is empty..."),
                 TextFont {
+                    font: font.clone(),
                     font_size: 36.0,
                     ..default()
                 },
@@ -232,6 +243,7 @@ fn spawn_ending(
             parent.spawn((
                 Text::new("But you can bring one item with you."),
                 TextFont {
+                    font: font.clone(),
                     font_size: 20.0,
                     ..default()
                 },
@@ -241,6 +253,7 @@ fn spawn_ending(
             parent.spawn((
                 Text::new("Select one item to keep:"),
                 TextFont {
+                    font: font.clone(),
                     font_size: 18.0,
                     ..default()
                 },
@@ -274,7 +287,7 @@ fn spawn_ending(
                     ];
                     for (name, slot) in &eq_slots {
                         if let Some(spec) = slot {
-                            spawn_ending_item_button(select_root, item_idx, name, spec);
+                            spawn_ending_item_button(select_root, item_idx, name, spec, &font);
                             item_idx += 1;
                         }
                     }
@@ -282,7 +295,7 @@ fn spawn_ending(
                     for (i, slot) in player_state.inventory.slots.iter().enumerate() {
                         if let Some(spec) = slot {
                             let name_str = format!("Inv{}", i + 1);
-                            spawn_ending_item_button(select_root, item_idx, &name_str, spec);
+                            spawn_ending_item_button(select_root, item_idx, &name_str, spec, &font);
                             item_idx += 1;
                         }
                     }
@@ -311,6 +324,7 @@ fn spawn_ending(
                         btn.spawn((
                             Text::new("Continue with item"),
                             TextFont {
+                                font: font.clone(),
                                 font_size: 18.0,
                                 ..default()
                             },
@@ -332,6 +346,7 @@ fn spawn_ending(
                         btn.spawn((
                             Text::new("Start fresh"),
                             TextFont {
+                                font: font.clone(),
                                 font_size: 18.0,
                                 ..default()
                             },
@@ -347,6 +362,7 @@ fn spawn_ending_item_button(
     index: usize,
     name: &str,
     spec: &ItemSpec,
+    font: &Handle<Font>,
 ) {
     parent
         .spawn((
@@ -369,6 +385,7 @@ fn spawn_ending_item_button(
                     spec.value
                 )),
                 TextFont {
+                    font: font.clone(),
                     font_size: 14.0,
                     ..default()
                 },
