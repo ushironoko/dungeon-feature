@@ -17,6 +17,7 @@ use crate::plugins::item::{
     compute_stat_value, determine_rarity, enemy_equipment_attack_bonus,
     enemy_equipment_defense_bonus, highest_rarity, rarity_color,
 };
+use crate::plugins::player::should_flip_x;
 use crate::resources::sprite_assets::{SpriteAssets, make_sprite};
 use crate::resources::{
     ActiveCharmEffects, CurrentFloor, DungeonRng, FloorMap, apply_movement_with_collision,
@@ -490,7 +491,13 @@ fn enemy_movement(
     config: Res<GameConfig>,
     player_query: Query<&Transform, With<Player>>,
     mut enemy_query: Query<
-        (&mut Transform, &Speed, &AiState, &WanderDirection),
+        (
+            &mut Transform,
+            &Speed,
+            &AiState,
+            &WanderDirection,
+            &mut Sprite,
+        ),
         (With<Enemy>, Without<Player>, Without<Dead>),
     >,
 ) {
@@ -500,7 +507,7 @@ fn enemy_movement(
     let player_pos = player_transform.translation.truncate();
     let tile_size = config.dungeon.tile_size;
 
-    for (mut transform, speed, ai_state, wander_dir) in &mut enemy_query {
+    for (mut transform, speed, ai_state, wander_dir, mut sprite) in &mut enemy_query {
         let velocity = match ai_state {
             AiState::Chase | AiState::Attack => {
                 let enemy_pos = transform.translation.truncate();
@@ -512,6 +519,7 @@ fn enemy_movement(
         };
 
         if velocity != Vec2::ZERO {
+            sprite.flip_x = should_flip_x(velocity.x, sprite.flip_x, 0.05);
             transform.translation = apply_movement_with_collision(
                 transform.translation,
                 velocity,

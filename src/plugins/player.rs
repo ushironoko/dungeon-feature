@@ -90,15 +90,26 @@ fn toggle_dash(keyboard: Res<ButtonInput<KeyCode>>, mut dash: ResMut<DashActive>
     }
 }
 
+/// スプライトの左右反転を判定する純粋関数。
+/// `direction_x` の絶対値が `deadzone` を超える場合のみ更新し、
+/// それ以外は `current_flip` を維持する。
+pub fn should_flip_x(direction_x: f32, current_flip: bool, deadzone: f32) -> bool {
+    if direction_x.abs() > deadzone {
+        direction_x < 0.0
+    } else {
+        current_flip
+    }
+}
+
 fn player_movement(
     keyboard: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
-    mut query: Query<(&mut Transform, &Speed, &mut FacingDirection), With<Player>>,
+    mut query: Query<(&mut Transform, &Speed, &mut FacingDirection, &mut Sprite), With<Player>>,
     floor_map: Res<FloorMap>,
     config: Res<GameConfig>,
     dash: Res<DashActive>,
 ) {
-    let Ok((mut transform, speed, mut facing)) = query.single_mut() else {
+    let Ok((mut transform, speed, mut facing, mut sprite)) = query.single_mut() else {
         return;
     };
 
@@ -123,6 +134,7 @@ fn player_movement(
 
     direction = direction.normalize();
     facing.0 = direction;
+    sprite.flip_x = should_flip_x(direction.x, sprite.flip_x, 0.0);
 
     let tile_size = config.dungeon.tile_size;
     let multiplier = if dash.0 {
@@ -310,5 +322,36 @@ fn check_treasure_chest(
     if floor_map.tile_at(tile_x, tile_y) == Some(TileKind::TreasureChest) {
         info!("Opening treasure chest... Ending!");
         next_state.set(GameState::Ending);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_flip_x_left() {
+        assert!(should_flip_x(-1.0, false, 0.0));
+    }
+
+    #[test]
+    fn test_should_flip_x_right() {
+        assert!(!should_flip_x(1.0, true, 0.0));
+    }
+
+    #[test]
+    fn test_should_flip_x_zero_preserves() {
+        assert!(should_flip_x(0.0, true, 0.0));
+        assert!(!should_flip_x(0.0, false, 0.0));
+    }
+
+    #[test]
+    fn test_should_flip_x_deadzone() {
+        // デッドゾーン内なら current_flip を維持
+        assert!(should_flip_x(0.03, true, 0.05));
+        assert!(!should_flip_x(-0.04, false, 0.05));
+        // デッドゾーンを超えたら更新
+        assert!(!should_flip_x(0.06, true, 0.05));
+        assert!(should_flip_x(-0.06, false, 0.05));
     }
 }
