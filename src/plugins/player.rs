@@ -227,7 +227,9 @@ fn sync_player_state(query: Query<&Health, With<Player>>, mut player_state: ResM
     let Ok(health) = query.single() else {
         return;
     };
-    player_state.current_hp = health.current;
+    if player_state.current_hp != health.current {
+        player_state.current_hp = health.current;
+    }
 }
 
 fn check_stairs(

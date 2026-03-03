@@ -1,11 +1,11 @@
 use bevy::prelude::*;
 
 use crate::config::GameConfig;
-use crate::events::{DamageApplied, DamageEvent, EnemyDeathMessage};
+use crate::events::{DamageApplied, DamageEvent, EnemyDeathMessage, EnemyEquipmentDropMessage};
 use crate::resources::font::GameFont;
 use crate::resources::player_state::PlayerState;
 use crate::resources::sprite_assets::SpriteAssets;
-use crate::resources::transfer_state::TransferState;
+use crate::resources::transfer_state::{TransferArrivalNotice, TransferState};
 use crate::resources::{ActiveCharmEffects, CurrentFloor, DungeonRng, RegenTimer};
 use crate::states::{FloorTransitionSetup, GameState, PlayingSet};
 
@@ -30,6 +30,8 @@ impl Plugin for CorePlugin {
             .add_message::<DamageEvent>()
             .add_message::<DamageApplied>()
             .add_message::<EnemyDeathMessage>()
+            .add_message::<EnemyEquipmentDropMessage>()
+            .init_resource::<TransferArrivalNotice>()
             .init_resource::<ActiveCharmEffects>()
             .init_resource::<RegenTimer>()
             .configure_sets(
@@ -76,6 +78,9 @@ fn load_sprite_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
         slime: asset_server.load("sprites/enemies/slime.png"),
         bat: asset_server.load("sprites/enemies/bat.png"),
         golem: asset_server.load("sprites/enemies/golem.png"),
+        slime_ii: asset_server.load("sprites/enemies/slime_ii.png"),
+        bat_ii: asset_server.load("sprites/enemies/bat_ii.png"),
+        golem_ii: asset_server.load("sprites/enemies/golem_ii.png"),
         item_weapon: asset_server.load("sprites/items/weapon.png"),
         item_head: asset_server.load("sprites/items/head.png"),
         item_torso: asset_server.load("sprites/items/torso.png"),

@@ -2,13 +2,24 @@ use bevy::prelude::*;
 
 use crate::components::item::{DroppedItem, Item, ItemLevel, ItemRarity, ItemSpec, ItemType};
 use crate::config::GameConfig;
-use crate::plugins::item::{rarity_color, recompute_item_value};
+use crate::plugins::item::{item_kind_label, rarity_color, rarity_prefix, recompute_item_value};
+use crate::resources::font::GameFont;
 use crate::resources::sprite_assets::{SpriteAssets, make_sprite};
-use crate::resources::transfer_state::{FutureTransferItem, PastTransferItem, TransferState};
+use crate::resources::transfer_state::{
+    ArrivedItemInfo, FutureTransferItem, PastTransferItem, TransferArrivalNotice, TransferState,
+};
 use crate::resources::{CurrentFloor, DungeonRng, FloorMap};
 use crate::states::FloorTransitionSetup;
 use crate::states::GameState;
 use rand::Rng;
+
+const BANNER_LIFETIME: f32 = 3.0;
+const BANNER_FADE_DURATION: f32 = 1.0;
+
+#[derive(Component)]
+struct TransferBanner {
+    lifetime: f32,
+}
 
 pub struct TransferPlugin;
 
@@ -17,7 +28,14 @@ impl Plugin for TransferPlugin {
         app.add_systems(
             OnEnter(GameState::FloorTransition),
             spawn_transferred_items.in_set(FloorTransitionSetup::SpawnEntities),
-        );
+        )
+        .add_systems(OnEnter(GameState::Playing), spawn_transfer_banner)
+        .add_systems(
+            Update,
+            update_transfer_banner.run_if(in_state(GameState::Playing)),
+        )
+        .add_systems(OnEnter(GameState::GameOver), cleanup_banner)
+        .add_systems(OnEnter(GameState::Ending), cleanup_banner);
     }
 }
 
@@ -101,6 +119,7 @@ pub fn collect_items_for_floor(state: &mut TransferState, floor: u32) -> Vec<Fut
 fn spawn_transferred_items(
     mut commands: Commands,
     mut transfer_state: ResMut<TransferState>,
+    mut arrival_notice: ResMut<TransferArrivalNotice>,
     current_floor: Res<CurrentFloor>,
     floor_map: Res<FloorMap>,
     config: Res<GameConfig>,
@@ -114,11 +133,27 @@ fn spawn_transferred_items(
 
     // 未来送りアイテムのスポーン（レベルブースト適用）
     let future_items = collect_items_for_floor(&mut transfer_state, floor);
+
+    // 到着通知をクリアして新たに書き込み
+    arrival_notice.clear();
+    let mut notice_idx = 0;
+
     for item in &future_items {
         let boosted_level = future_transfer_level(item.source_floor, item.target_floor);
         let mut boosted_spec = item.spec;
         boosted_spec.level = boosted_level;
         boosted_spec.value = recompute_item_value(&boosted_spec, &config.item);
+
+        // 到着通知に記録
+        if notice_idx < arrival_notice.items.len() {
+            arrival_notice.items[notice_idx] = Some(ArrivedItemInfo {
+                kind: boosted_spec.kind,
+                rarity: boosted_spec.rarity,
+                level: boosted_spec.level,
+            });
+            notice_idx += 1;
+        }
+
         spawn_transfer_item(
             &mut commands,
             &floor_map,
@@ -177,6 +212,119 @@ fn spawn_transfer_item(
         "Transferred item spawned: {:?} Lv{} (value: {})",
         spec.kind, spec.level, spec.value
     );
+}
+
+// --- バナーシステム ---
+
+fn spawn_transfer_banner(
+    mut commands: Commands,
+    mut arrival_notice: ResMut<TransferArrivalNotice>,
+    existing: Query<Entity, With<TransferBanner>>,
+    game_font: Res<GameFont>,
+) {
+    // 既存バナーがあれば何もしない（InventoryOpen→Playing 復帰時の二重スポーン防止）
+    if !existing.is_empty() {
+        return;
+    }
+
+    if arrival_notice.is_empty() {
+        return;
+    }
+
+    // アイテムリスト文字列を生成
+    let mut parts: Vec<String> = Vec::new();
+    for info in arrival_notice.items.iter().flatten() {
+        let prefix = rarity_prefix(info.rarity);
+        let label = item_kind_label(info.kind);
+        if prefix.is_empty() {
+            parts.push(format!("{} Lv{}", label, info.level));
+        } else {
+            parts.push(format!("{}{} Lv{}", prefix, label, info.level));
+        }
+    }
+    let items_text = parts.join(", ");
+
+    // notice をクリア（InventoryOpen→Playing 復帰時に再表示しない）
+    arrival_notice.clear();
+
+    let font = game_font.0.clone();
+
+    commands
+        .spawn((
+            TransferBanner {
+                lifetime: BANNER_LIFETIME,
+            },
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(40.0),
+                left: Val::Percent(50.0),
+                padding: UiRect::axes(Val::Px(16.0), Val::Px(8.0)),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.1, 0.1, 0.3, 0.85)),
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new("転送アイテムがこの階に到着!"),
+                TextFont {
+                    font: font.clone(),
+                    font_size: 18.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(1.0, 0.9, 0.3)),
+            ));
+            parent.spawn((
+                Text::new(items_text),
+                TextFont {
+                    font,
+                    font_size: 14.0,
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+            ));
+        });
+}
+
+fn update_transfer_banner(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut banner_query: Query<(Entity, &mut TransferBanner, &mut BackgroundColor, &Children)>,
+    mut text_color_query: Query<&mut TextColor>,
+) {
+    for (entity, mut banner, mut bg_color, children) in &mut banner_query {
+        banner.lifetime -= time.delta_secs();
+
+        if banner.lifetime <= 0.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+
+        // 残り BANNER_FADE_DURATION 秒でフェードアウト
+        if banner.lifetime < BANNER_FADE_DURATION {
+            let alpha = banner.lifetime / BANNER_FADE_DURATION;
+            // 背景色のアルファを減衰
+            let mut bg = bg_color.0.to_srgba();
+            bg.alpha = 0.85 * alpha;
+            bg_color.0 = bg.into();
+
+            // 子テキストの TextColor アルファを減衰
+            for child in children.iter() {
+                if let Ok(mut text_color) = text_color_query.get_mut(child) {
+                    let mut c = text_color.0.to_srgba();
+                    c.alpha = alpha;
+                    text_color.0 = c.into();
+                }
+            }
+        }
+    }
+}
+
+fn cleanup_banner(mut commands: Commands, query: Query<Entity, With<TransferBanner>>) {
+    for entity in &query {
+        commands.entity(entity).despawn();
+    }
 }
 
 #[cfg(test)]

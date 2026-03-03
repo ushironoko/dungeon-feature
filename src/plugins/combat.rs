@@ -1,10 +1,11 @@
 use bevy::prelude::*;
 
+use crate::components::item::ItemKind;
 use crate::components::{
-    AttackCooldown, AttackEffect, Dead, Enemy, Health, InvincibilityTimer, Player,
+    AttackCooldown, AttackEffect, Dead, Enemy, EnemyEquipment, Health, InvincibilityTimer, Player,
 };
 use crate::config::{EnemyConfig, GameConfig};
-use crate::events::{DamageApplied, DamageEvent, EnemyDeathMessage};
+use crate::events::{DamageApplied, DamageEvent, EnemyDeathMessage, EnemyEquipmentDropMessage};
 use crate::resources::CurrentFloor;
 use crate::states::{GameState, PlayingSet};
 
@@ -52,10 +53,12 @@ pub struct EnemyKindMeta {
     pub wander_min: f32,
     pub wander_max: f32,
     pub color: (f32, f32, f32),
+    pub equip_slots_min: u8,
+    pub equip_slots_max: u8,
 }
 
-pub static ENEMY_KIND_META: &[EnemyKindMeta] = &[
-    // Slime
+pub static ENEMY_KIND_META: &[EnemyKindMeta; 6] = &[
+    // 0: Slime
     EnemyKindMeta {
         hp_mult: 1.0,
         attack_mult: 1.0,
@@ -67,8 +70,10 @@ pub static ENEMY_KIND_META: &[EnemyKindMeta] = &[
         wander_min: 2.0,
         wander_max: 4.0,
         color: (0.2, 0.8, 0.3),
+        equip_slots_min: 0,
+        equip_slots_max: 1,
     },
-    // Bat
+    // 1: Bat
     EnemyKindMeta {
         hp_mult: 0.5,
         attack_mult: 0.8,
@@ -80,8 +85,10 @@ pub static ENEMY_KIND_META: &[EnemyKindMeta] = &[
         wander_min: 0.5,
         wander_max: 1.5,
         color: (0.6, 0.2, 0.8),
+        equip_slots_min: 0,
+        equip_slots_max: 2,
     },
-    // Golem
+    // 2: Golem
     EnemyKindMeta {
         hp_mult: 3.0,
         attack_mult: 1.5,
@@ -93,6 +100,53 @@ pub static ENEMY_KIND_META: &[EnemyKindMeta] = &[
         wander_min: 4.0,
         wander_max: 8.0,
         color: (0.5, 0.5, 0.55),
+        equip_slots_min: 1,
+        equip_slots_max: 3,
+    },
+    // 3: SlimeII
+    EnemyKindMeta {
+        hp_mult: 2.0,
+        attack_mult: 1.5,
+        defense_mult: 1.5,
+        speed_mult: 0.8,
+        detection_mult: 1.0,
+        attack_range_mult: 1.0,
+        attack_cooldown: 0.8,
+        wander_min: 1.5,
+        wander_max: 3.0,
+        color: (0.1, 0.5, 0.2),
+        equip_slots_min: 1,
+        equip_slots_max: 2,
+    },
+    // 4: BatII
+    EnemyKindMeta {
+        hp_mult: 0.8,
+        attack_mult: 1.2,
+        defense_mult: 0.5,
+        speed_mult: 2.0,
+        detection_mult: 1.8,
+        attack_range_mult: 1.0,
+        attack_cooldown: 0.5,
+        wander_min: 0.3,
+        wander_max: 1.0,
+        color: (0.8, 0.1, 0.3),
+        equip_slots_min: 1,
+        equip_slots_max: 3,
+    },
+    // 5: GolemII
+    EnemyKindMeta {
+        hp_mult: 4.0,
+        attack_mult: 2.0,
+        defense_mult: 2.8,
+        speed_mult: 0.4,
+        detection_mult: 0.8,
+        attack_range_mult: 1.3,
+        attack_cooldown: 2.5,
+        wander_min: 3.0,
+        wander_max: 6.0,
+        color: (0.3, 0.3, 0.7),
+        equip_slots_min: 2,
+        equip_slots_max: 3,
     },
 ];
 
@@ -102,6 +156,9 @@ impl EnemyKind {
             EnemyKind::Slime => 0,
             EnemyKind::Bat => 1,
             EnemyKind::Golem => 2,
+            EnemyKind::SlimeII => 3,
+            EnemyKind::BatII => 4,
+            EnemyKind::GolemII => 5,
         }
     }
 }
@@ -173,7 +230,21 @@ pub fn enemy_stats(kind: EnemyKind, floor: u32, config: &EnemyConfig) -> (u32, u
 
 /// フロアと乱数に基づいて敵種別を決定
 pub fn determine_enemy_kind(floor: u32, roll: f32) -> EnemyKind {
-    if floor >= 15 {
+    if floor >= 10 {
+        if roll < 0.10 {
+            EnemyKind::Slime
+        } else if roll < 0.20 {
+            EnemyKind::Bat
+        } else if roll < 0.30 {
+            EnemyKind::Golem
+        } else if roll < 0.55 {
+            EnemyKind::SlimeII
+        } else if roll < 0.80 {
+            EnemyKind::BatII
+        } else {
+            EnemyKind::GolemII
+        }
+    } else if floor >= 6 {
         if roll < 0.40 {
             EnemyKind::Slime
         } else if roll < 0.75 {
@@ -181,7 +252,7 @@ pub fn determine_enemy_kind(floor: u32, roll: f32) -> EnemyKind {
         } else {
             EnemyKind::Golem
         }
-    } else if floor >= 5 {
+    } else if floor >= 3 {
         if roll < 0.60 {
             EnemyKind::Slime
         } else {
@@ -189,6 +260,31 @@ pub fn determine_enemy_kind(floor: u32, roll: f32) -> EnemyKind {
         }
     } else {
         EnemyKind::Slime
+    }
+}
+
+/// フロア依存の敵装備保有確率
+pub fn enemy_hold_probability(floor: u32) -> f32 {
+    0.05 + ((floor as f32 - 1.0) / 49.0).clamp(0.0, 1.0) * 0.75
+}
+
+/// 確率枠がアイテムを持つかどうかの判定
+pub fn should_enemy_hold_item(floor: u32, roll: f32) -> bool {
+    roll < enemy_hold_probability(floor)
+}
+
+/// 敵が装備可能な5種から均等選択
+pub fn enemy_equippable_item_kind(roll: f32) -> ItemKind {
+    if roll < 0.2 {
+        ItemKind::Weapon
+    } else if roll < 0.4 {
+        ItemKind::Head
+    } else if roll < 0.6 {
+        ItemKind::Torso
+    } else if roll < 0.8 {
+        ItemKind::Legs
+    } else {
+        ItemKind::Shield
     }
 }
 
@@ -251,20 +347,31 @@ fn process_damage(
 #[allow(clippy::type_complexity)]
 fn check_death(
     mut commands: Commands,
-    enemy_query: Query<(Entity, &Health, &Transform), (With<Enemy>, Without<Dead>)>,
+    enemy_query: Query<
+        (Entity, &Health, &Transform, Option<&EnemyEquipment>),
+        (With<Enemy>, Without<Dead>),
+    >,
     player_query: Query<&Health, With<Player>>,
     mut next_state: ResMut<NextState<GameState>>,
     mut enemy_death_events: MessageWriter<EnemyDeathMessage>,
+    mut equip_drop_events: MessageWriter<EnemyEquipmentDropMessage>,
     current_floor: Res<CurrentFloor>,
 ) {
     // 敵の死亡チェック
-    for (entity, health, transform) in &enemy_query {
+    for (entity, health, transform, equipment) in &enemy_query {
         if health.current == 0 {
             let pos = transform.translation.truncate();
             enemy_death_events.write(EnemyDeathMessage {
                 position: pos,
                 floor: current_floor.number(),
             });
+            if let Some(equip) = equipment {
+                equip_drop_events.write(EnemyEquipmentDropMessage {
+                    position: pos,
+                    floor: current_floor.number(),
+                    items: equip.slots,
+                });
+            }
             info!("Enemy defeated!");
             commands.entity(entity).insert(Dead);
         }
@@ -485,22 +592,162 @@ mod tests {
 
     #[test]
     fn test_determine_enemy_kind_boundaries() {
-        // Floor 1: always Slime
+        // Floor 1-2: always Slime
         assert_eq!(determine_enemy_kind(1, 0.0), EnemyKind::Slime);
-        assert_eq!(determine_enemy_kind(1, 0.99), EnemyKind::Slime);
+        assert_eq!(determine_enemy_kind(2, 0.99), EnemyKind::Slime);
 
-        // Floor 5: 60% Slime, 40% Bat
-        assert_eq!(determine_enemy_kind(5, 0.0), EnemyKind::Slime);
-        assert_eq!(determine_enemy_kind(5, 0.59), EnemyKind::Slime);
-        assert_eq!(determine_enemy_kind(5, 0.61), EnemyKind::Bat);
+        // Floor 3-5: 60% Slime, 40% Bat
+        assert_eq!(determine_enemy_kind(3, 0.0), EnemyKind::Slime);
+        assert_eq!(determine_enemy_kind(3, 0.59), EnemyKind::Slime);
+        assert_eq!(determine_enemy_kind(3, 0.61), EnemyKind::Bat);
         assert_eq!(determine_enemy_kind(5, 0.99), EnemyKind::Bat);
 
-        // Floor 15: 40% Slime, 35% Bat, 25% Golem
-        assert_eq!(determine_enemy_kind(15, 0.0), EnemyKind::Slime);
-        assert_eq!(determine_enemy_kind(15, 0.39), EnemyKind::Slime);
-        assert_eq!(determine_enemy_kind(15, 0.41), EnemyKind::Bat);
-        assert_eq!(determine_enemy_kind(15, 0.74), EnemyKind::Bat);
-        assert_eq!(determine_enemy_kind(15, 0.76), EnemyKind::Golem);
-        assert_eq!(determine_enemy_kind(15, 0.99), EnemyKind::Golem);
+        // Floor 6-9: 40% Slime, 35% Bat, 25% Golem
+        assert_eq!(determine_enemy_kind(6, 0.0), EnemyKind::Slime);
+        assert_eq!(determine_enemy_kind(6, 0.39), EnemyKind::Slime);
+        assert_eq!(determine_enemy_kind(6, 0.41), EnemyKind::Bat);
+        assert_eq!(determine_enemy_kind(6, 0.74), EnemyKind::Bat);
+        assert_eq!(determine_enemy_kind(6, 0.76), EnemyKind::Golem);
+        assert_eq!(determine_enemy_kind(9, 0.99), EnemyKind::Golem);
+
+        // Floor 10+: 10% Slime, 10% Bat, 10% Golem, 25% SlimeII, 25% BatII, 20% GolemII
+        assert_eq!(determine_enemy_kind(10, 0.0), EnemyKind::Slime);
+        assert_eq!(determine_enemy_kind(10, 0.09), EnemyKind::Slime);
+        assert_eq!(determine_enemy_kind(10, 0.11), EnemyKind::Bat);
+        assert_eq!(determine_enemy_kind(10, 0.19), EnemyKind::Bat);
+        assert_eq!(determine_enemy_kind(10, 0.21), EnemyKind::Golem);
+        assert_eq!(determine_enemy_kind(10, 0.29), EnemyKind::Golem);
+        assert_eq!(determine_enemy_kind(10, 0.31), EnemyKind::SlimeII);
+        assert_eq!(determine_enemy_kind(10, 0.54), EnemyKind::SlimeII);
+        assert_eq!(determine_enemy_kind(10, 0.56), EnemyKind::BatII);
+        assert_eq!(determine_enemy_kind(10, 0.79), EnemyKind::BatII);
+        assert_eq!(determine_enemy_kind(10, 0.81), EnemyKind::GolemII);
+        assert_eq!(determine_enemy_kind(10, 0.99), EnemyKind::GolemII);
+        assert_eq!(determine_enemy_kind(50, 0.99), EnemyKind::GolemII);
+    }
+
+    #[test]
+    fn test_enemy_stats_slime_ii() {
+        let config = default_enemy_config();
+        // Floor 10: slime base = (40, 15, round(7.0)=7, 70.0)
+        // SlimeII: hp*2.0=80, atk*1.5=22, def*1.5=10, speed*0.8=56.0
+        let (hp, atk, def, speed) = enemy_stats(EnemyKind::SlimeII, 10, &config);
+        assert_eq!(hp, 80);
+        assert_eq!(atk, 22);
+        assert_eq!(def, 10);
+        assert!((speed - 56.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_enemy_stats_bat_ii() {
+        let config = default_enemy_config();
+        // Floor 10: slime base = (40, 15, round(7.0)=7, 70.0)
+        // BatII: hp*0.8=32, atk*1.2=18, def*0.5=3, speed*2.0=140.0
+        let (hp, atk, def, speed) = enemy_stats(EnemyKind::BatII, 10, &config);
+        assert_eq!(hp, 32);
+        assert_eq!(atk, 18);
+        assert_eq!(def, 3);
+        assert!((speed - 140.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_enemy_stats_golem_ii() {
+        let config = default_enemy_config();
+        // Floor 10: slime base = (40, 15, round(7.0)=7, 70.0)
+        // GolemII: hp*4.0=160, atk*2.0=30, def*2.8=19, speed*0.4=28.0
+        let (hp, atk, def, speed) = enemy_stats(EnemyKind::GolemII, 10, &config);
+        assert_eq!(hp, 160);
+        assert_eq!(atk, 30);
+        assert_eq!(def, 19);
+        assert!((speed - 28.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_meta_index_in_bounds() {
+        let all_kinds = [
+            EnemyKind::Slime,
+            EnemyKind::Bat,
+            EnemyKind::Golem,
+            EnemyKind::SlimeII,
+            EnemyKind::BatII,
+            EnemyKind::GolemII,
+        ];
+        for kind in all_kinds {
+            assert!(
+                kind.meta_index() < ENEMY_KIND_META.len(),
+                "{kind:?} meta_index {} out of bounds (len={})",
+                kind.meta_index(),
+                ENEMY_KIND_META.len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_enemy_hold_probability() {
+        let p1 = enemy_hold_probability(1);
+        assert!((p1 - 0.05).abs() < 0.01, "floor 1: {p1}");
+
+        let p25 = enemy_hold_probability(25);
+        // 0.05 + (24/49) * 0.75 ≈ 0.05 + 0.3673 ≈ 0.417
+        assert!((p25 - 0.42).abs() < 0.02, "floor 25: {p25}");
+
+        let p50 = enemy_hold_probability(50);
+        // 0.05 + (49/49) * 0.75 = 0.80
+        assert!((p50 - 0.80).abs() < 0.01, "floor 50: {p50}");
+    }
+
+    #[test]
+    fn test_should_enemy_hold_item() {
+        // floor 1: probability ≈ 0.05
+        assert!(should_enemy_hold_item(1, 0.0));
+        assert!(should_enemy_hold_item(1, 0.04));
+        assert!(!should_enemy_hold_item(1, 0.06));
+        assert!(!should_enemy_hold_item(1, 0.99));
+
+        // floor 50: probability = 0.80
+        assert!(should_enemy_hold_item(50, 0.0));
+        assert!(should_enemy_hold_item(50, 0.79));
+        assert!(!should_enemy_hold_item(50, 0.81));
+    }
+
+    #[test]
+    fn test_enemy_equippable_item_kind() {
+        use crate::components::item::ItemKind;
+        assert_eq!(enemy_equippable_item_kind(0.0), ItemKind::Weapon);
+        assert_eq!(enemy_equippable_item_kind(0.19), ItemKind::Weapon);
+        assert_eq!(enemy_equippable_item_kind(0.21), ItemKind::Head);
+        assert_eq!(enemy_equippable_item_kind(0.39), ItemKind::Head);
+        assert_eq!(enemy_equippable_item_kind(0.41), ItemKind::Torso);
+        assert_eq!(enemy_equippable_item_kind(0.59), ItemKind::Torso);
+        assert_eq!(enemy_equippable_item_kind(0.61), ItemKind::Legs);
+        assert_eq!(enemy_equippable_item_kind(0.79), ItemKind::Legs);
+        assert_eq!(enemy_equippable_item_kind(0.81), ItemKind::Shield);
+        assert_eq!(enemy_equippable_item_kind(0.99), ItemKind::Shield);
+    }
+
+    #[test]
+    fn test_equip_meta_bounds() {
+        let all_kinds = [
+            EnemyKind::Slime,
+            EnemyKind::Bat,
+            EnemyKind::Golem,
+            EnemyKind::SlimeII,
+            EnemyKind::BatII,
+            EnemyKind::GolemII,
+        ];
+        for kind in all_kinds {
+            let meta = &ENEMY_KIND_META[kind.meta_index()];
+            assert!(
+                meta.equip_slots_min <= meta.equip_slots_max,
+                "{kind:?}: min {} > max {}",
+                meta.equip_slots_min,
+                meta.equip_slots_max
+            );
+            assert!(
+                meta.equip_slots_max <= 3,
+                "{kind:?}: max {} > 3",
+                meta.equip_slots_max
+            );
+        }
     }
 }

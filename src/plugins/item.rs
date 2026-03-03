@@ -5,7 +5,7 @@ use crate::components::item::{
 };
 use crate::components::{Attack, Defense, Health, Player};
 use crate::config::{GameConfig, ItemConfig};
-use crate::events::EnemyDeathMessage;
+use crate::events::{EnemyDeathMessage, EnemyEquipmentDropMessage};
 use crate::resources::player_state::{Equipment, Inventory, PlayerState};
 use crate::resources::sprite_assets::{SpriteAssets, make_sprite};
 use crate::resources::{ActiveCharmEffects, DungeonRng};
@@ -18,7 +18,12 @@ impl Plugin for ItemPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (spawn_item_drop, item_pickup, update_player_stats)
+            (
+                spawn_equipment_drops,
+                spawn_item_drop,
+                item_pickup,
+                update_player_stats,
+            )
                 .chain()
                 .in_set(PlayingSet::Item)
                 .run_if(in_state(GameState::Playing)),
@@ -263,7 +268,121 @@ pub fn rarity_prefix(rarity: Rarity) -> &'static str {
     }
 }
 
+// --- 敵装備関連 純粋関数 ---
+
+/// レアリティの順序値（0-4）
+pub fn rarity_rank(rarity: Rarity) -> u8 {
+    match rarity {
+        Rarity::Common => 0,
+        Rarity::Uncommon => 1,
+        Rarity::Rare => 2,
+        Rarity::Epic => 3,
+        Rarity::Legendary => 4,
+    }
+}
+
+/// 装備スロット配列内の最高レアリティを返す
+pub fn highest_rarity(slots: &[Option<ItemSpec>; 3]) -> Option<Rarity> {
+    slots
+        .iter()
+        .filter_map(|s| s.as_ref())
+        .max_by_key(|spec| rarity_rank(spec.rarity))
+        .map(|spec| spec.rarity)
+}
+
+/// 敵装備による ATK ボーナス（Weapon のみ加算）
+pub fn enemy_equipment_attack_bonus(slots: &[Option<ItemSpec>; 3], config: &ItemConfig) -> u32 {
+    slots
+        .iter()
+        .filter_map(|s| s.as_ref())
+        .filter(|spec| spec.kind == ItemKind::Weapon)
+        .map(|spec| {
+            compute_stat_value(
+                config.weapon_base_stat,
+                spec.rarity,
+                spec.level,
+                config.stat_level_scaling,
+            )
+        })
+        .sum()
+}
+
+/// 敵装備による DEF ボーナス（防具のみ加算）
+pub fn enemy_equipment_defense_bonus(slots: &[Option<ItemSpec>; 3], config: &ItemConfig) -> u32 {
+    slots
+        .iter()
+        .filter_map(|s| s.as_ref())
+        .filter(|spec| {
+            matches!(
+                spec.kind,
+                ItemKind::Head | ItemKind::Torso | ItemKind::Legs | ItemKind::Shield
+            )
+        })
+        .map(|spec| {
+            compute_stat_value(
+                config.armor_base_stat,
+                spec.rarity,
+                spec.level,
+                config.stat_level_scaling,
+            )
+        })
+        .sum()
+}
+
 // --- Systems ---
+
+fn spawn_equipment_drops(
+    mut commands: Commands,
+    mut events: MessageReader<EnemyEquipmentDropMessage>,
+    config: Res<GameConfig>,
+    sprite_assets: Res<SpriteAssets>,
+    images: Res<Assets<Image>>,
+) {
+    for event in events.read() {
+        let tile_size = config.dungeon.tile_size;
+        let sprite_size = tile_size * config.item.item_sprite_scale;
+
+        let mut offset_idx: f32 = 0.0;
+        for slot in &event.items {
+            let Some(spec) = slot else {
+                continue;
+            };
+            let offset = Vec2::new(
+                offset_idx * sprite_size * 0.6,
+                offset_idx * sprite_size * 0.3,
+            );
+            let color = rarity_color(spec.rarity);
+
+            commands.spawn((
+                make_sprite(
+                    sprite_assets.item_handle(spec.kind),
+                    &images,
+                    color,
+                    color,
+                    Vec2::splat(sprite_size),
+                ),
+                Transform::from_xyz(
+                    event.position.x + offset.x,
+                    event.position.y + offset.y,
+                    0.5,
+                ),
+                Item,
+                ItemType(spec.kind),
+                ItemRarity(spec.rarity),
+                ItemLevel(spec.level),
+                DroppedItem,
+            ));
+
+            info!(
+                "Enemy equipment dropped: {}{:?} Lv{}",
+                rarity_prefix(spec.rarity),
+                spec.kind,
+                spec.level
+            );
+            offset_idx += 1.0;
+        }
+    }
+}
 
 fn spawn_item_drop(
     mut commands: Commands,
@@ -340,7 +459,10 @@ fn item_pickup(
     let pickup_distance = config.dungeon.tile_size * 0.6;
 
     // インベントリ容量を装備から計算
-    player_state.inventory.capacity = inventory_capacity(&player_state.equipment, &config.item);
+    let new_capacity = inventory_capacity(&player_state.equipment, &config.item);
+    if player_state.inventory.capacity != new_capacity {
+        player_state.inventory.capacity = new_capacity;
+    }
 
     for (entity, item_transform, item_type, item_rarity, item_level) in &item_query {
         let item_pos = item_transform.translation.truncate();
@@ -670,5 +792,79 @@ mod tests {
         assert_eq!(effects.drop_bonus, 0.0);
         assert_eq!(effects.detection_reduction, 0.0);
         assert_eq!(effects.cooldown_reduction, 0.0);
+    }
+
+    #[test]
+    fn test_rarity_rank_ordering() {
+        assert_eq!(rarity_rank(Rarity::Common), 0);
+        assert_eq!(rarity_rank(Rarity::Uncommon), 1);
+        assert_eq!(rarity_rank(Rarity::Rare), 2);
+        assert_eq!(rarity_rank(Rarity::Epic), 3);
+        assert_eq!(rarity_rank(Rarity::Legendary), 4);
+        assert!(rarity_rank(Rarity::Common) < rarity_rank(Rarity::Legendary));
+    }
+
+    #[test]
+    fn test_highest_rarity_empty() {
+        let slots: [Option<ItemSpec>; 3] = [None, None, None];
+        assert!(highest_rarity(&slots).is_none());
+    }
+
+    #[test]
+    fn test_highest_rarity_mixed() {
+        let slots: [Option<ItemSpec>; 3] = [
+            Some(make_spec(ItemKind::Weapon, Rarity::Common, 1, 5)),
+            Some(make_spec(ItemKind::Head, Rarity::Epic, 1, 10)),
+            Some(make_spec(ItemKind::Torso, Rarity::Rare, 1, 8)),
+        ];
+        assert_eq!(highest_rarity(&slots), Some(Rarity::Epic));
+    }
+
+    #[test]
+    fn test_enemy_equipment_attack_bonus_weapon() {
+        let config = default_item_config();
+        let slots: [Option<ItemSpec>; 3] = [
+            Some(make_spec(ItemKind::Weapon, Rarity::Common, 10, 0)),
+            None,
+            None,
+        ];
+        // compute_stat_value(5, Common, 10, 0.1) = 5 * 1.0 * 2.0 = 10
+        assert_eq!(enemy_equipment_attack_bonus(&slots, &config), 10);
+    }
+
+    #[test]
+    fn test_enemy_equipment_attack_bonus_armor_only() {
+        let config = default_item_config();
+        let slots: [Option<ItemSpec>; 3] = [
+            Some(make_spec(ItemKind::Head, Rarity::Common, 10, 0)),
+            Some(make_spec(ItemKind::Torso, Rarity::Rare, 5, 0)),
+            None,
+        ];
+        // 防具は ATK 0
+        assert_eq!(enemy_equipment_attack_bonus(&slots, &config), 0);
+    }
+
+    #[test]
+    fn test_enemy_equipment_defense_bonus() {
+        let config = default_item_config();
+        let slots: [Option<ItemSpec>; 3] = [
+            Some(make_spec(ItemKind::Head, Rarity::Common, 10, 0)),
+            Some(make_spec(ItemKind::Torso, Rarity::Common, 10, 0)),
+            Some(make_spec(ItemKind::Shield, Rarity::Common, 10, 0)),
+        ];
+        // compute_stat_value(3, Common, 10, 0.1) = 3 * 1.0 * 2.0 = 6 each → 18
+        assert_eq!(enemy_equipment_defense_bonus(&slots, &config), 18);
+    }
+
+    #[test]
+    fn test_enemy_equipment_defense_bonus_weapon_only() {
+        let config = default_item_config();
+        let slots: [Option<ItemSpec>; 3] = [
+            Some(make_spec(ItemKind::Weapon, Rarity::Legendary, 50, 0)),
+            None,
+            None,
+        ];
+        // 武器は DEF 0
+        assert_eq!(enemy_equipment_defense_bonus(&slots, &config), 0);
     }
 }

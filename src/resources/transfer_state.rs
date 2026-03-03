@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use rand::Rng;
 
-use crate::components::item::ItemSpec;
+use crate::components::item::{ItemKind, ItemSpec, Rarity};
 
 #[derive(Debug, Clone, Copy)]
 pub struct FutureTransferItem {
@@ -70,5 +70,27 @@ impl TransferState {
                 self.past_items[i] = None;
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ArrivedItemInfo {
+    pub kind: ItemKind,
+    pub rarity: Rarity,
+    pub level: u32,
+}
+
+#[derive(Resource, Default)]
+pub struct TransferArrivalNotice {
+    pub items: [Option<ArrivedItemInfo>; 8],
+}
+
+impl TransferArrivalNotice {
+    pub fn clear(&mut self) {
+        self.items = [None; 8];
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.iter().all(|s| s.is_none())
     }
 }

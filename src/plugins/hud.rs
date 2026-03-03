@@ -137,7 +137,7 @@ fn cleanup_hud(mut commands: Commands, query: Query<Entity, With<HudRoot>>) {
 }
 
 fn update_hp_bar(
-    player_query: Query<&Health, With<Player>>,
+    player_query: Query<&Health, (With<Player>, Changed<Health>)>,
     mut bar_query: Query<&mut Node, With<HpBarFill>>,
 ) {
     let Ok(health) = player_query.single() else {
@@ -159,6 +159,9 @@ fn update_floor_text(
     current_floor: Res<CurrentFloor>,
     mut query: Query<&mut Text, With<FloorText>>,
 ) {
+    if !current_floor.is_changed() {
+        return;
+    }
     let Ok(mut text) = query.single_mut() else {
         return;
     };
@@ -176,6 +179,9 @@ fn update_equipment_text(
     player_state: Res<PlayerState>,
     mut query: Query<&mut Text, With<EquipmentText>>,
 ) {
+    if !player_state.is_changed() {
+        return;
+    }
     let Ok(mut text) = query.single_mut() else {
         return;
     };
@@ -196,6 +202,9 @@ fn update_transfer_charge_text(
     transfer_state: Res<TransferState>,
     mut query: Query<&mut Text, With<HudTransferChargeText>>,
 ) {
+    if !transfer_state.is_changed() {
+        return;
+    }
     let Ok(mut text) = query.single_mut() else {
         return;
     };
@@ -203,6 +212,9 @@ fn update_transfer_charge_text(
 }
 
 fn update_dash_state_text(dash: Res<DashActive>, mut query: Query<&mut Text, With<DashStateText>>) {
+    if !dash.is_changed() {
+        return;
+    }
     let Ok(mut text) = query.single_mut() else {
         return;
     };

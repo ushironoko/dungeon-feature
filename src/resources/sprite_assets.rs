@@ -9,6 +9,9 @@ pub struct SpriteAssets {
     pub slime: Handle<Image>,
     pub bat: Handle<Image>,
     pub golem: Handle<Image>,
+    pub slime_ii: Handle<Image>,
+    pub bat_ii: Handle<Image>,
+    pub golem_ii: Handle<Image>,
     pub item_weapon: Handle<Image>,
     pub item_head: Handle<Image>,
     pub item_torso: Handle<Image>,
@@ -26,6 +29,9 @@ impl SpriteAssets {
             EnemyKind::Slime => &self.slime,
             EnemyKind::Bat => &self.bat,
             EnemyKind::Golem => &self.golem,
+            EnemyKind::SlimeII => &self.slime_ii,
+            EnemyKind::BatII => &self.bat_ii,
+            EnemyKind::GolemII => &self.golem_ii,
         }
     }
 

@@ -1,14 +1,21 @@
 use bevy::prelude::*;
 use rand::Rng;
 
+use crate::components::item::{ItemKind, ItemSpec};
 use crate::components::{
     AiState, Attack, AttackCooldown, AttackRange, ChaseLostTimer, Dead, Defense, DetectionRadius,
-    Enemy, FloorEntity, Health, Player, Speed, WanderDirection, WanderInterval, WanderTimer,
+    Enemy, EnemyAuraMarker, EnemyEquipment, FloorEntity, Health, Player, Speed, WanderDirection,
+    WanderInterval, WanderTimer,
 };
 use crate::config::GameConfig;
 use crate::events::DamageEvent;
 use crate::plugins::combat::{
-    ENEMY_KIND_META, calculate_damage, determine_enemy_kind, enemy_stats,
+    ENEMY_KIND_META, calculate_damage, determine_enemy_kind, enemy_equippable_item_kind,
+    enemy_stats, should_enemy_hold_item,
+};
+use crate::plugins::item::{
+    compute_stat_value, determine_rarity, enemy_equipment_attack_bonus,
+    enemy_equipment_defense_bonus, highest_rarity, rarity_color,
 };
 use crate::resources::sprite_assets::{SpriteAssets, make_sprite};
 use crate::resources::{
@@ -44,6 +51,63 @@ impl Plugin for EnemyPlugin {
 const MIN_SPAWN_DISTANCE_TILES: f32 = 8.0;
 /// 部屋内でのリトライ回数上限
 const SPAWN_POSITION_RETRIES: u32 = 5;
+/// 装備オーラの透明度
+const ENEMY_AURA_ALPHA: f32 = 0.35;
+/// 装備オーラのサイズ倍率（tile_size × この値）
+const ENEMY_AURA_SIZE_MULT: f32 = 0.9;
+
+/// テスト可能な純粋関数。乱数は外部から注入。
+pub fn generate_enemy_equipment(
+    equip_min: u8,
+    equip_max: u8,
+    floor: u32,
+    hold_rolls: &[f32],
+    kind_rolls: &[f32],
+    rarity_rolls: &[f32],
+    config: &crate::config::ItemConfig,
+) -> [Option<ItemSpec>; 3] {
+    let mut slots: [Option<ItemSpec>; 3] = [None; 3];
+    if equip_max == 0 {
+        return slots;
+    }
+
+    let mut filled = 0u8;
+    for i in 0..equip_max.min(3) {
+        let idx = i as usize;
+        let should_fill = if i < equip_min {
+            // 保証枠
+            true
+        } else {
+            // 確率枠
+            let roll_idx = (i - equip_min) as usize;
+            if roll_idx < hold_rolls.len() {
+                should_enemy_hold_item(floor, hold_rolls[roll_idx])
+            } else {
+                false
+            }
+        };
+
+        if should_fill && idx < kind_rolls.len() && idx < rarity_rolls.len() {
+            let kind = enemy_equippable_item_kind(kind_rolls[idx]);
+            let rarity = determine_rarity(floor, rarity_rolls[idx]);
+            let level = floor;
+            let base = match kind {
+                ItemKind::Weapon => config.weapon_base_stat,
+                _ => config.armor_base_stat,
+            };
+            let value = compute_stat_value(base, rarity, level, config.stat_level_scaling);
+            slots[idx] = Some(ItemSpec {
+                kind,
+                rarity,
+                level,
+                value,
+            });
+            filled += 1;
+        }
+    }
+    let _ = filled;
+    slots
+}
 
 fn spawn_enemies(
     mut commands: Commands,
@@ -131,6 +195,30 @@ fn spawn_enemy_batch(
         let meta = &ENEMY_KIND_META[kind.meta_index()];
         let (hp, atk, def, speed) = enemy_stats(kind, floor, &config.enemy);
 
+        // 装備生成
+        let mut hold_rolls = [0.0f32; 3];
+        let mut kind_rolls_arr = [0.0f32; 3];
+        let mut rarity_rolls = [0.0f32; 3];
+        for j in 0..3 {
+            hold_rolls[j] = dungeon_rng.0.random();
+            kind_rolls_arr[j] = dungeon_rng.0.random();
+            rarity_rolls[j] = dungeon_rng.0.random();
+        }
+        let equipment = generate_enemy_equipment(
+            meta.equip_slots_min,
+            meta.equip_slots_max,
+            floor,
+            &hold_rolls,
+            &kind_rolls_arr,
+            &rarity_rolls,
+            &config.item,
+        );
+
+        let atk_bonus = enemy_equipment_attack_bonus(&equipment, &config.item);
+        let def_bonus = enemy_equipment_defense_bonus(&equipment, &config.item);
+        let final_atk = atk + atk_bonus;
+        let final_def = def + def_bonus;
+
         // 遠い部屋から優先的に使用
         let room_idx = room_indices[i as usize % room_indices.len()];
         let room = &available_rooms[room_idx];
@@ -179,8 +267,9 @@ fn spawn_enemy_batch(
         }
 
         let (cr, cg, cb) = meta.color;
+        let has_equipment = equipment.iter().any(|s| s.is_some());
 
-        commands.spawn((
+        let mut entity_cmd = commands.spawn((
             make_sprite(
                 sprite_assets.enemy_handle(kind),
                 images,
@@ -196,8 +285,8 @@ fn spawn_enemy_batch(
                 current: hp,
                 max: hp,
             },
-            Attack(atk),
-            Defense(def),
+            Attack(final_atk),
+            Defense(final_def),
             Speed(speed),
             AiState::Idle,
             WanderTimer(0.0),
@@ -216,6 +305,21 @@ fn spawn_enemy_batch(
                 ChaseLostTimer(0.0),
             ),
         ));
+
+        if has_equipment {
+            entity_cmd.insert(EnemyEquipment { slots: equipment });
+
+            // オーラ子エンティティ生成
+            if let Some(top_rarity) = highest_rarity(&equipment) {
+                let aura_color = rarity_color(top_rarity).with_alpha(ENEMY_AURA_ALPHA);
+                let aura_size = Vec2::splat(tile_size * ENEMY_AURA_SIZE_MULT);
+                entity_cmd.with_child((
+                    Sprite::from_color(aura_color, aura_size),
+                    Transform::from_xyz(0.0, 0.0, -0.1),
+                    EnemyAuraMarker,
+                ));
+            }
+        }
     }
 }
 
@@ -457,5 +561,73 @@ fn enemy_attack(
             });
             cooldown.remaining = cooldown.duration;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ItemConfig;
+
+    fn default_item_config() -> ItemConfig {
+        ItemConfig {
+            drop_rate: 0.30,
+            weapon_base_stat: 5,
+            armor_base_stat: 3,
+            potion_base_heal: 20,
+            stat_level_scaling: 0.1,
+            item_sprite_scale: 0.5,
+            backpack_base_capacity: 2,
+            backpack_capacity_per_rarity: 1,
+        }
+    }
+
+    #[test]
+    fn test_generate_enemy_equipment_guaranteed() {
+        let config = default_item_config();
+        // min=2, max=3 → 最初の2個は保証枠
+        let equipment = generate_enemy_equipment(
+            2,
+            3,
+            10,
+            &[0.99],          // 確率枠1個は高い roll → 不成立の可能性（floor 10: prob≈0.19）
+            &[0.0, 0.3, 0.5], // Weapon, Head, Torso
+            &[0.0, 0.0, 0.0], // Common
+            &config,
+        );
+        // 保証枠2個は必ず存在
+        assert!(equipment[0].is_some(), "guaranteed slot 0 must be filled");
+        assert!(equipment[1].is_some(), "guaranteed slot 1 must be filled");
+    }
+
+    #[test]
+    fn test_generate_enemy_equipment_max_zero() {
+        let config = default_item_config();
+        let equipment = generate_enemy_equipment(0, 0, 50, &[], &[], &[], &config);
+        assert!(equipment.iter().all(|s| s.is_none()));
+    }
+
+    #[test]
+    fn test_generate_enemy_equipment_multiple_weapons() {
+        let config = default_item_config();
+        // min=2 保証枠、全て Weapon (roll=0.0)
+        let equipment = generate_enemy_equipment(
+            2,
+            2,
+            10,
+            &[],
+            &[0.0, 0.0], // 両方 Weapon
+            &[0.0, 0.0], // 両方 Common
+            &config,
+        );
+        assert!(equipment[0].is_some());
+        assert!(equipment[1].is_some());
+        assert_eq!(equipment[0].unwrap().kind, ItemKind::Weapon);
+        assert_eq!(equipment[1].unwrap().kind, ItemKind::Weapon);
+
+        // ATK ボーナスが2つ分加算される
+        let atk = enemy_equipment_attack_bonus(&equipment, &config);
+        let single = compute_stat_value(5, crate::components::item::Rarity::Common, 10, 0.1);
+        assert_eq!(atk, single * 2);
     }
 }

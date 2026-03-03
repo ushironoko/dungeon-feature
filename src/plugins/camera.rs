@@ -2,14 +2,19 @@ use bevy::prelude::*;
 
 use crate::components::CameraFollow;
 use crate::plugins::feedback::ScreenShake;
-use crate::states::GameState;
+use crate::states::{GameState, PlayingSet};
 
 pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(GameState::Loading), spawn_camera)
-            .add_systems(Update, camera_follow.run_if(in_state(GameState::Playing)));
+            .add_systems(
+                Update,
+                camera_follow
+                    .after(PlayingSet::PostCombat)
+                    .run_if(in_state(GameState::Playing)),
+            );
     }
 }
 

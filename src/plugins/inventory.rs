@@ -630,6 +630,9 @@ fn update_slot_display(
     >,
     transfer_state: Res<TransferState>,
 ) {
+    if !selected.is_changed() && !player_state.is_changed() && !transfer_state.is_changed() {
+        return;
+    }
     let capacity = inventory_capacity(&player_state.equipment, &config.item) as usize;
 
     for (slot_node, mut text, mut text_color, mut bg) in &mut slot_query {
@@ -660,6 +663,9 @@ fn update_equipment_display(
     player_state: Res<PlayerState>,
     mut equip_query: Query<(&EquipmentSlotNode, &mut Text, &mut TextColor)>,
 ) {
+    if !player_state.is_changed() {
+        return;
+    }
     for (slot_node, mut text, mut text_color) in &mut equip_query {
         let spec = player_state.equipment.get(slot_node.0);
         **text = format_equip_slot_text(slot_node.0, spec);
